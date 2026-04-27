@@ -142,7 +142,7 @@ body {
   top: 0;
   left: 0;
   right: 0;
-  z-index: 300;
+  z-index: 1000;
   height: 60px;
   background: var(--bg-glass);
   backdrop-filter: blur(24px) saturate(1.5);
@@ -151,6 +151,27 @@ body {
   justify-content: space-between;
   padding: 0 20px;
 }
+.icon-btn {
+  width: 42px;
+  height: 42px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  position: relative;
+  z-index: 1001;
+}
+.icon-btn.active {
+  background: rgba(74, 158, 255, 0.22);
+  border-color: rgba(74, 158, 255, 0.45);
+}
+
 .top-bar-logo {
   display: flex;
   align-items: center;
@@ -166,7 +187,7 @@ body {
   top: 0;
   bottom: 0;
   width: var(--panel-width);
-  z-index: 200;
+  z-index: 900;
   background: var(--bg-glass);
   backdrop-filter: blur(32px) saturate(1.8);
   border-right: 1px solid var(--border);
@@ -997,6 +1018,8 @@ body {
   gap: 10px;
   padding: 16px 24px 24px;
   border-top: 1px solid var(--border);
+    z-index: 950;
+    pointer-events: auto;
 }
 
 /* --- MapLibre Overrides --- */
@@ -1090,6 +1113,8 @@ body.map-grabbing * {
     transform: translateX(-100%);
     border-right: none;
     border-top: 1px solid var(--border);
+    z-index: 950;
+    pointer-events: auto;
   }
   .side-panel.open {
     transform: translateX(0);

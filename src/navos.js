@@ -587,6 +587,42 @@ export function initNavOS(maplibregl) {
       showToast("Navigation terminée");
     });
 
+  // Menu mobile : ouvre/ferme le panneau d'itinéraire
+  // Corrige le problème où le bouton hamburger était visible mais sans action sur téléphone.
+  const menuToggle = document.getElementById("menuToggle");
+  const sidePanel = document.getElementById("sidePanel");
+
+  const toggleMobilePanel = (event) => {
+    if (event) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+    if (!sidePanel) return;
+    sidePanel.classList.toggle("open");
+    if (menuToggle) {
+      const isOpen = sidePanel.classList.contains("open");
+      menuToggle.classList.toggle("active", isOpen);
+      menuToggle.setAttribute("aria-expanded", isOpen ? "true" : "false");
+    }
+  };
+
+  if (menuToggle) {
+    menuToggle.setAttribute("aria-expanded", "false");
+    menuToggle.addEventListener("click", toggleMobilePanel);
+    menuToggle.addEventListener("touchend", toggleMobilePanel, { passive: false });
+  }
+
+  const mapContainer = document.getElementById("map");
+  if (mapContainer) {
+    mapContainer.addEventListener("click", () => {
+      if (window.innerWidth <= 768 && sidePanel?.classList.contains("open")) {
+        sidePanel.classList.remove("open");
+        menuToggle?.classList.remove("active");
+        menuToggle?.setAttribute("aria-expanded", "false");
+      }
+    });
+  }
+
   // 11. CONTRÔLES CARTE UI
   const viewBtns = {
     map: document.getElementById("viewMap"),
