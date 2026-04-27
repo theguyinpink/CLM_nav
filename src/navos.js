@@ -5,7 +5,7 @@
 
 
 export function initNavOS(maplibregl) {
-  console.log("🚀 Initialisation de NavOS...");
+  console.log("🚀 Initialisation de CLM NAV..");
 
   // 1. ÉTATS & VARIABLES GLOBALES
   const state = {
@@ -1750,7 +1750,7 @@ export function initNavOS(maplibregl) {
       stopTrafficLiveRefresh();
       if (map) map.remove();
     } catch (error) {
-      console.warn("Nettoyage NavOS incomplet :", error);
+      console.warn("Nettoyage CLM NAV incomplet :", error);
     }
   };
 }
