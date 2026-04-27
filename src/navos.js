@@ -123,6 +123,11 @@ export function initNavOS(maplibregl) {
     map.on("style.load", () => {
       injectCustomLayers();
       restoreRouteData();
+      ensure3DBuildings();
+    });
+
+    map.on("idle", () => {
+      if (state.mapMode === "3d" && !map.getLayer("3d-buildings")) ensure3DBuildings();
     });
 
     ["dragstart", "rotatestart", "pitchstart", "zoomstart"].forEach((eventName) => {
@@ -205,17 +210,28 @@ export function initNavOS(maplibregl) {
 
   const injectCustomLayers = () => {
     try {
-      const sources = map.getStyle().sources || {};
+      const style = map.getStyle();
+      const sources = style.sources || {};
       const vectorSourceKey = Object.keys(sources).find(
         (k) => sources[k].type === "vector",
       );
+      const buildingLayerFromStyle = (style.layers || []).find((layer) => {
+        const sourceLayer = String(layer["source-layer"] || "").toLowerCase();
+        const id = String(layer.id || "").toLowerCase();
+        return sourceLayer.includes("building") || id.includes("building");
+      });
+      const buildingSourceKey = buildingLayerFromStyle?.source || vectorSourceKey;
+      const buildingSourceLayer = buildingLayerFromStyle?.["source-layer"] || "building";
+      const firstSymbolLayerId = (style.layers || []).find((layer) => layer.type === "symbol")?.id;
 
       // Bâtiments avant le tracé, sinon la route peut être cachée par les volumes 3D.
-      if (vectorSourceKey && !map.getLayer("3d-buildings")) {
+      // On détecte aussi le vrai `source-layer` du style, car selon le chargement Carto/MapLibre
+      // le nom peut varier et donnait parfois une 3D qui apparaissait une fois sur deux.
+      if (buildingSourceKey && !map.getLayer("3d-buildings")) {
         map.addLayer({
           id: "3d-buildings",
-          source: vectorSourceKey,
-          "source-layer": "building",
+          source: buildingSourceKey,
+          "source-layer": buildingSourceLayer,
           type: "fill-extrusion",
           minzoom: 14,
           layout: { visibility: state.mapMode === "3d" ? "visible" : "none" },
@@ -231,20 +247,21 @@ export function initNavOS(maplibregl) {
             ],
             "fill-extrusion-height": [
               "coalesce",
-              ["get", "render_height"],
-              ["get", "height"],
+              ["to-number", ["get", "render_height"]],
+              ["to-number", ["get", "height"]],
+              ["to-number", ["get", "levels"]],
               18,
             ],
             "fill-extrusion-base": [
               "coalesce",
-              ["get", "render_min_height"],
-              ["get", "min_height"],
+              ["to-number", ["get", "render_min_height"]],
+              ["to-number", ["get", "min_height"]],
               0,
             ],
             "fill-extrusion-opacity": 0.82,
           },
-        });
-        console.log("✅ Couche bâtiments 3D injectée sur source:", vectorSourceKey);
+        }, firstSymbolLayerId);
+        console.log("✅ Couche bâtiments 3D injectée:", buildingSourceKey, buildingSourceLayer);
       }
 
       ["fastest", "shortest"].forEach((key) => {
@@ -338,6 +355,24 @@ export function initNavOS(maplibregl) {
         e,
       );
     }
+  };
+
+
+  const ensure3DBuildings = () => {
+    if (!map || state.mapMode === "sat") return;
+    const tryInject = () => {
+      try {
+        injectCustomLayers();
+        if (state.mapMode === "3d" && map.getLayer("3d-buildings")) {
+          map.setLayoutProperty("3d-buildings", "visibility", "visible");
+        }
+      } catch (error) {
+        console.warn("Retry bâtiments 3D impossible :", error);
+      }
+    };
+    tryInject();
+    setTimeout(tryInject, 300);
+    setTimeout(tryInject, 900);
   };
 
   // 5. ROTATION AVEC LE CLIC MOLETTE (Middle Click)
@@ -786,7 +821,7 @@ export function initNavOS(maplibregl) {
       document.getElementById("clearRouteBtn").style.display = "none";
     });
 
-  // 9. ROUTAGE OSRM — nouvelle UX : deux tracés visibles puis sélection sur la carte
+  // 9. ROUTAGE TOMTOM — deux tracés visibles puis sélection sur la carte
   const clearRouteVisuals = () => {
     state.routeCoords = [];
     state.routeSummary = null;
@@ -895,10 +930,10 @@ export function initNavOS(maplibregl) {
       coords: route.geometry.coordinates,
       dist: route.distance,
       duration: route.duration,
-      durationWithTraffic: adjustedDuration(route.duration),
+      durationWithTraffic: route.durationWithTraffic || adjustedDuration(route.duration),
       trafficSegments: [...state.trafficSegments],
-      trafficFactor: state.trafficFactor,
-      trafficDelay: state.trafficDelay,
+      trafficFactor: route.durationWithTraffic && route.duration ? Math.max(1, route.durationWithTraffic / route.duration) : state.trafficFactor,
+      trafficDelay: route.trafficDelay ?? state.trafficDelay,
       steps: route.legs?.[0]?.steps || [],
     };
     state.trafficSegments = oldSegments;
@@ -933,6 +968,98 @@ export function initNavOS(maplibregl) {
     );
   });
 
+
+  const getTomTomTravelMode = () => {
+    if (state.mode === "bike") return "bicycle";
+    if (state.mode === "foot") return "pedestrian";
+    return "car";
+  };
+
+  const decodeTomTomRoute = (route, key = "fastest") => {
+    const points = route?.legs?.flatMap((leg) => leg.points || []) || [];
+    const coords = points
+      .filter((point) => Number.isFinite(point.latitude) && Number.isFinite(point.longitude))
+      .map((point) => [point.longitude, point.latitude]);
+
+    const summary = route?.summary || {};
+    const liveDuration = summary.travelTimeInSeconds || 0;
+    const noTrafficDuration =
+      summary.noTrafficTravelTimeInSeconds ||
+      summary.historicTrafficTravelTimeInSeconds ||
+      summary.travelTimeInSeconds ||
+      0;
+    const trafficDelay = summary.trafficDelayInSeconds ?? Math.max(0, (summary.travelTimeInSeconds || noTrafficDuration) - noTrafficDuration);
+
+    return {
+      key,
+      geometry: { type: "LineString", coordinates: coords },
+      distance: summary.lengthInMeters || 0,
+      duration: noTrafficDuration || liveDuration,
+      durationWithTraffic: summary.travelTimeInSeconds || noTrafficDuration || liveDuration,
+      trafficDelay,
+      legs: [
+        {
+          steps: (route?.guidance?.instructions || []).map((instruction) => ({
+            maneuver: {
+              instruction: instruction.message || instruction.street || "Continuez sur l’itinéraire",
+            },
+            distance: instruction.routeOffsetInMeters || 0,
+          })),
+        },
+      ],
+      raw: route,
+    };
+  };
+
+  const fetchTomTomRoutes = async (routeType = "fastest", maxAlternatives = 1) => {
+    const key = getTomTomApiKey();
+    if (!key) throw new Error("Clé TomTom manquante. Ajoute VITE_TOMTOM_API_KEY dans .env ou dans Vercel.");
+
+    const params = new URLSearchParams({
+      key,
+      traffic: "true",
+      routeType,
+      travelMode: getTomTomTravelMode(),
+      maxAlternatives: String(maxAlternatives),
+      instructionsType: "text",
+      language: "fr-FR",
+      computeTravelTimeFor: "all",
+      routeRepresentation: "polyline",
+    });
+
+    const start = `${state.origin.lat},${state.origin.lon}`;
+    const end = `${state.destination.lat},${state.destination.lon}`;
+    const url = `https://api.tomtom.com/routing/1/calculateRoute/${start}:${end}/json?${params.toString()}`;
+    const res = await fetch(url);
+    if (!res.ok) {
+      const txt = await res.text().catch(() => "");
+      throw new Error(`TomTom Routing HTTP ${res.status} ${txt}`);
+    }
+    const data = await res.json();
+    if (!data.routes?.length) throw new Error("TomTom n'a renvoyé aucun itinéraire");
+    return data.routes.map((route, index) => decodeTomTomRoute(route, index === 0 ? routeType : `${routeType}-${index}`));
+  };
+
+  const getTomTomRoutePair = async () => {
+    const fastestRoutes = await fetchTomTomRoutes("fastest", 2);
+    let fastest = fastestRoutes[0];
+    let alternative = fastestRoutes.find((route) => !routesLookSame(route, fastest));
+
+    let shortest = null;
+    try {
+      const shortestRoutes = await fetchTomTomRoutes("shortest", 1);
+      shortest = shortestRoutes[0];
+    } catch (error) {
+      console.warn("TomTom shortest indisponible, utilisation d'une alternative fastest :", error);
+    }
+
+    if (shortest && !routesLookSame(shortest, fastest)) alternative = shortest;
+    if (!alternative && fastestRoutes[1]) alternative = fastestRoutes[1];
+    if (!alternative) alternative = shortest || fastest;
+
+    return { fastest, shortest: alternative };
+  };
+
   const calculateRoute = async () => {
     const ok = await ensureOriginFromCurrentPosition();
     if (!ok || !state.destination) return;
@@ -942,21 +1069,16 @@ export function initNavOS(maplibregl) {
     if (navStatus) navStatus.textContent = "Calcul des 2 itinéraires…";
     try {
       clearRouteVisuals();
-      const profile = getRouteProfile();
-      const service = getRoutingService();
-      const res = await fetch(`https://routing.openstreetmap.de/routed-${service}/route/v1/${profile}/${state.origin.lon},${state.origin.lat};${state.destination.lon},${state.destination.lat}?overview=full&geometries=geojson&steps=true&alternatives=3`);
-      const data = await res.json();
-      if (data.code !== "Ok" || !data.routes?.length) throw new Error("Réponse OSRM invalide");
-      const fastest = data.routes.reduce((best, current) => current.duration < best.duration ? current : best);
-      const shortest = data.routes.reduce((best, current) => current.distance < best.distance ? current : best);
+      const { fastest, shortest } = await getTomTomRoutePair();
       const [fastestOption, rawShortestOption] = await Promise.all([
         makeRouteOption("fastest", fastest),
         makeRouteOption("shortest", shortest),
       ]);
       const shortestOption = { ...rawShortestOption };
-      if (data.routes.length < 2 || routesLookSame(fastest, shortest)) {
-        // OSRM public ne fournit pas toujours une alternative. On garde le vrai tracé pour la navigation,
-        // mais on décale l'affichage du second choix pour qu'il soit cliquable et compréhensible visuellement.
+      if (routesLookSame(fastest, shortest)) {
+        // TomTom peut parfois renvoyer deux trajets très proches selon la zone.
+        // On garde les vraies données pour la navigation, mais on décale légèrement
+        // l'affichage du second tracé pour qu'il reste cliquable.
         shortestOption.displayCoords = makeDisplayOffsetCoords(shortestOption.coords, 20);
         shortestOption.isFallbackAlternative = true;
       }
@@ -972,7 +1094,7 @@ export function initNavOS(maplibregl) {
       selectRouteOption("fastest");
       if (navStatus) {
         navStatus.textContent = state.routeOptions.shortest?.isFallbackAlternative
-          ? "Cliquez sur un tracé. OSRM n'a renvoyé qu'un vrai trajet, la variante courte est affichée séparément."
+          ? "Cliquez sur un tracé. TomTom a renvoyé deux trajets très proches, la variante courte est affichée séparément."
           : "Cliquez sur un tracé pour choisir votre trajet.";
       }
       const clearBtn = document.getElementById("clearRouteBtn");
@@ -1281,11 +1403,17 @@ export function initNavOS(maplibregl) {
       state.mapMode = "3d";
       if (map && map.getStyle().name !== "Dark Matter") {
         map.setStyle(VECTOR_STYLE_URL);
-      } else if (map && map.getLayer("3d-buildings")) {
-        map.setLayoutProperty("3d-buildings", "visibility", "visible");
-        bringRouteToFront();
+      } else if (map) {
+        ensure3DBuildings();
+        if (map.getLayer("3d-buildings")) {
+          map.setLayoutProperty("3d-buildings", "visibility", "visible");
+          bringRouteToFront();
+        }
       }
-      if (map) map.easeTo({ pitch: 60 });
+      if (map) {
+        map.easeTo({ pitch: 60 });
+        ensure3DBuildings();
+      }
     });
 
   if (viewBtns.sat)
