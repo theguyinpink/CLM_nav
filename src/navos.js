@@ -20,12 +20,17 @@ export function initNavOS(maplibregl) {
     routeSummary: null,
     routeSteps: [],
     mapMode: "map",
+    autoFollow: true,
+    lastGpsPoint: null,
+    smoothedHeading: 0,
+    ignoreCameraEvent: false,
   };
 
   let map;
   let originMarker = null;
   let destMarker = null;
   let userMarker = null;
+  let recenterBtn = null;
 
   // 2. SÉCURITÉ LOADER (Timeout GitHub Pages)
   const hideLoader = () => {
@@ -104,7 +109,18 @@ export function initNavOS(maplibregl) {
       injectCustomLayers();
     });
 
-    map.on("style.load", () => injectCustomLayers());
+    map.on("style.load", () => {
+      injectCustomLayers();
+      restoreRouteData();
+    });
+
+    ["dragstart", "rotatestart", "pitchstart", "zoomstart"].forEach((eventName) => {
+      map.on(eventName, () => {
+        if (!state.isNavigating || state.ignoreCameraEvent) return;
+        state.autoFollow = false;
+        updateRecenterButton();
+      });
+    });
 
     // Synchro Boussole
     map.on("rotate", () => {
@@ -119,23 +135,82 @@ export function initNavOS(maplibregl) {
   }
 
   // 4. INJECTION DES COUCHES DYNAMIQUES (Route + Bâtiments 3D)
+  const routeFeature = () => ({
+    type: "Feature",
+    properties: {},
+    geometry: {
+      type: "LineString",
+      coordinates: state.routeCoords || [],
+    },
+  });
+
+  const restoreRouteData = () => {
+    try {
+      if (map?.getSource("route")) {
+        map.getSource("route").setData(routeFeature());
+      }
+    } catch (error) {
+      console.warn("Route non restaurée après changement de style :", error);
+    }
+  };
+
+  const bringRouteToFront = () => {
+    try {
+      if (map.getLayer("route-casing")) map.moveLayer("route-casing");
+      if (map.getLayer("route-line")) map.moveLayer("route-line");
+    } catch (error) {
+      console.warn("Impossible de replacer le tracé au-dessus de la carte :", error);
+    }
+  };
+
   const injectCustomLayers = () => {
     try {
-      if (!map.getSource("route")) {
-        map.addSource("route", {
-          type: "geojson",
-          data: {
-            type: "Feature",
-            properties: {},
-            geometry: {
-              type: "LineString",
-              coordinates: state.routeCoords || [],
-            },
+      const sources = map.getStyle().sources || {};
+      const vectorSourceKey = Object.keys(sources).find(
+        (k) => sources[k].type === "vector",
+      );
+
+      // Bâtiments avant le tracé, sinon la route peut être cachée par les volumes 3D.
+      if (vectorSourceKey && !map.getLayer("3d-buildings")) {
+        map.addLayer({
+          id: "3d-buildings",
+          source: vectorSourceKey,
+          "source-layer": "building",
+          type: "fill-extrusion",
+          minzoom: 14,
+          layout: { visibility: state.mapMode === "3d" ? "visible" : "none" },
+          paint: {
+            "fill-extrusion-color": [
+              "interpolate",
+              ["linear"],
+              ["zoom"],
+              14,
+              "#111827",
+              18,
+              "#242838",
+            ],
+            "fill-extrusion-height": [
+              "coalesce",
+              ["get", "render_height"],
+              ["get", "height"],
+              18,
+            ],
+            "fill-extrusion-base": [
+              "coalesce",
+              ["get", "render_min_height"],
+              ["get", "min_height"],
+              0,
+            ],
+            "fill-extrusion-opacity": 0.82,
           },
         });
+        console.log("✅ Couche bâtiments 3D injectée sur source:", vectorSourceKey);
       }
 
-      // Tracé d'itinéraire Glow
+      if (!map.getSource("route")) {
+        map.addSource("route", { type: "geojson", data: routeFeature() });
+      }
+
       if (!map.getLayer("route-casing")) {
         map.addLayer({
           id: "route-casing",
@@ -143,46 +218,22 @@ export function initNavOS(maplibregl) {
           source: "route",
           layout: { "line-join": "round", "line-cap": "round" },
           paint: {
-            "line-color": "#2563EB",
-            "line-width": 8,
-            "line-opacity": 0.4,
-            "line-blur": 4,
+            "line-color": "#0B1220",
+            "line-width": 12,
+            "line-opacity": 0.72,
+            "line-blur": 2,
           },
         });
       }
 
-      // Tracé d'itinéraire Ligne
       if (!map.getLayer("route-line")) {
         map.addLayer({
           id: "route-line",
           type: "line",
           source: "route",
           layout: { "line-join": "round", "line-cap": "round" },
-          paint: { "line-color": "#4A9EFF", "line-width": 5 },
+          paint: { "line-color": "#4A9EFF", "line-width": 6, "line-opacity": 0.98 },
         });
-      }
-
-      // Bâtiments 3D extrudés (CartoDB utilise 'openmaptiles' ou 'carto' pour la source vectorielle)
-      const sources = map.getStyle().sources;
-      const vectorSourceKey = Object.keys(sources).find(
-        (k) => sources[k].type === "vector",
-      );
-
-      if (vectorSourceKey && !map.getLayer("3d-buildings")) {
-        map.addLayer({
-          id: "3d-buildings",
-          source: vectorSourceKey,
-          "source-layer": "building",
-          type: "fill-extrusion",
-          minzoom: 15,
-          paint: {
-            "fill-extrusion-color": "#1a1a24",
-            "fill-extrusion-height": ["get", "render_height"],
-            "fill-extrusion-base": ["get", "render_min_height"],
-            "fill-extrusion-opacity": 0.8,
-          },
-        });
-        console.log("✅ Couche 3D injectée sur source:", vectorSourceKey);
       }
 
       if (map.getLayer("3d-buildings")) {
@@ -192,6 +243,9 @@ export function initNavOS(maplibregl) {
           state.mapMode === "3d" ? "visible" : "none",
         );
       }
+
+      restoreRouteData();
+      bringRouteToFront();
     } catch (e) {
       console.warn(
         "⚠️ Erreur lors de l'injection des couches (normal si satellite est actif) :",
@@ -298,17 +352,92 @@ export function initNavOS(maplibregl) {
     }
   };
 
-  const updateUserMarker = (lat, lon) => {
+  const modeIcon = () => {
+    if (state.mode === "bike") {
+      return '<svg viewBox="0 0 24 24"><circle cx="5.5" cy="17.5" r="3.2"/><circle cx="18.5" cy="17.5" r="3.2"/><path d="M8.5 17.5l3-7 3 7m-3-7h3.5l2.2 7M10.4 7h3.2M8.5 17.5h6"/></svg>';
+    }
+    if (state.mode === "foot") {
+      return '<svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="2.4"/><path d="M10.5 9l-2.2 4.5 3.2 2.2-2 5M13.5 9l2.2 4.2 2.8 1.3M12 11.5l2.4 3.3-1.1 5.2"/></svg>';
+    }
+    return '<svg viewBox="0 0 24 24"><path d="M6.5 16h11l1.2-4.5a2 2 0 0 0-1.9-2.5H7.2a2 2 0 0 0-1.9 2.5L6.5 16Z"/><path d="M8 9l1.5-3h5L16 9M7 16v2M17 16v2"/><circle cx="8.5" cy="17.5" r="1.5"/><circle cx="15.5" cy="17.5" r="1.5"/></svg>';
+  };
+
+  const updateUserMarker = (lat, lon, heading = state.smoothedHeading) => {
     if (!map) return;
     if (!userMarker) {
       const el = document.createElement("div");
-      el.innerHTML = '<div class="user-marker-pulse"></div>';
-      userMarker = new maplibregl.Marker({ element: el })
+      el.className = "user-avatar-marker";
+      el.innerHTML = '<div class="user-avatar-aura"></div><div class="user-avatar-core" data-mode="' + state.mode + '">' + modeIcon() + '</div>';
+      userMarker = new maplibregl.Marker({ element: el, rotationAlignment: "map" })
         .setLngLat([lon, lat])
         .addTo(map);
     } else {
       userMarker.setLngLat([lon, lat]);
+      const core = userMarker.getElement().querySelector(".user-avatar-core");
+      if (core) {
+        core.dataset.mode = state.mode;
+        core.innerHTML = modeIcon();
+      }
     }
+    const core = userMarker.getElement().querySelector(".user-avatar-core");
+    if (core) core.style.transform = "rotate(" + (heading || 0) + "deg)";
+  };
+
+  const bearingBetween = (from, to) => {
+    const toRad = (d) => (d * Math.PI) / 180;
+    const toDeg = (r) => (r * 180) / Math.PI;
+    const lat1 = toRad(from.lat);
+    const lat2 = toRad(to.lat);
+    const dLon = toRad(to.lon - from.lon);
+    const y = Math.sin(dLon) * Math.cos(lat2);
+    const x =
+      Math.cos(lat1) * Math.sin(lat2) -
+      Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
+    return (toDeg(Math.atan2(y, x)) + 360) % 360;
+  };
+
+  const smoothHeading = (target) => {
+    if (!Number.isFinite(target)) return state.smoothedHeading;
+    let diff = ((target - state.smoothedHeading + 540) % 360) - 180;
+    if (Math.abs(diff) < 4) return state.smoothedHeading;
+    state.smoothedHeading = (state.smoothedHeading + diff * 0.22 + 360) % 360;
+    return state.smoothedHeading;
+  };
+
+  const runCameraUpdate = (options) => {
+    if (!map) return;
+    state.ignoreCameraEvent = true;
+    map.easeTo({ ...options, duration: 650 });
+    setTimeout(() => {
+      state.ignoreCameraEvent = false;
+    }, 750);
+  };
+
+  const updateRecenterButton = () => {
+    if (!recenterBtn) return;
+    recenterBtn.classList.toggle("visible", state.isNavigating);
+    recenterBtn.classList.toggle("active", state.autoFollow);
+    recenterBtn.textContent = state.autoFollow ? "Suivi actif" : "Recentrer";
+  };
+
+  const ensureRecenterButton = () => {
+    if (recenterBtn) return;
+    recenterBtn = document.createElement("button");
+    recenterBtn.type = "button";
+    recenterBtn.className = "recenter-nav-btn";
+    recenterBtn.textContent = "Recentrer";
+    recenterBtn.addEventListener("click", () => {
+      if (!state.userLocation || !map) return;
+      state.autoFollow = true;
+      updateRecenterButton();
+      runCameraUpdate({
+        center: [state.userLocation.lon, state.userLocation.lat],
+        zoom: Math.max(map.getZoom(), 17),
+        pitch: state.mapMode === "3d" ? 65 : map.getPitch(),
+        bearing: state.smoothedHeading || map.getBearing(),
+      });
+    });
+    document.body.appendChild(recenterBtn);
   };
 
   // 8. AUTOCOMPLETE NOMINATIM
@@ -443,8 +572,11 @@ export function initNavOS(maplibregl) {
       state.routeSummary = { dist: route.distance, duration: route.duration };
       state.routeSteps = route.legs[0].steps;
 
-      if (map && map.getSource("route"))
-        map.getSource("route").setData(route.geometry);
+      if (map) {
+        injectCustomLayers();
+        restoreRouteData();
+        bringRouteToFront();
+      }
 
       if (map) {
         const bounds = new maplibregl.LngLatBounds(
@@ -483,6 +615,7 @@ export function initNavOS(maplibregl) {
         .forEach((b) => b.classList.remove("active"));
       e.currentTarget.classList.add("active");
       state.mode = e.currentTarget.dataset.mode;
+      if (state.userLocation) updateUserMarker(state.userLocation.lat, state.userLocation.lon);
       if (state.origin && state.destination) calculateRoute();
     });
   });
@@ -493,6 +626,10 @@ export function initNavOS(maplibregl) {
     startNavBtn.addEventListener("click", () => {
       if (!navigator.geolocation) return showToast("GPS non supporté", "error");
       state.isNavigating = true;
+      state.autoFollow = true;
+      state.lastGpsPoint = null;
+      ensureRecenterButton();
+      updateRecenterButton();
       document.getElementById("sidePanel").classList.add("nav-active");
       document.getElementById("navUI").classList.add("active");
 
@@ -505,29 +642,54 @@ export function initNavOS(maplibregl) {
       document.getElementById("navNextStreet").textContent =
         state.routeSteps.length > 0
           ? state.routeSteps[0].maneuver.instruction
-          : "Continuez";
+          : "Continuez sur l’itinéraire";
 
       document.getElementById("view3D").click(); // Auto 3D
-      if (map)
-        map.flyTo({
+      if (map) {
+        injectCustomLayers();
+        bringRouteToFront();
+        runCameraUpdate({
           center: [state.origin.lon, state.origin.lat],
           zoom: 18,
           pitch: 65,
           bearing: 0,
-          speed: 1.5,
         });
+      }
 
       state.watchId = navigator.geolocation.watchPosition(
         (pos) => {
           const { latitude, longitude, heading } = pos.coords;
-          updateUserMarker(latitude, longitude);
-          state.userLocation = { lat: latitude, lon: longitude };
+          const current = { lat: latitude, lon: longitude };
+          let targetHeading = Number.isFinite(heading) && heading >= 0 ? heading : null;
+
+          if (state.lastGpsPoint) {
+            const moved = getDistance(
+              state.lastGpsPoint.lat,
+              state.lastGpsPoint.lon,
+              latitude,
+              longitude,
+            );
+            if (moved >= 6) {
+              targetHeading = bearingBetween(state.lastGpsPoint, current);
+              state.lastGpsPoint = current;
+            }
+          } else {
+            state.lastGpsPoint = current;
+          }
+
+          const stableHeading = smoothHeading(targetHeading ?? state.smoothedHeading);
+          updateUserMarker(latitude, longitude, stableHeading);
+          state.userLocation = current;
 
           if (state.isNavigating && map) {
-            map.easeTo({
-              center: [longitude, latitude],
-              bearing: heading || map.getBearing(),
-            });
+            if (state.autoFollow) {
+              runCameraUpdate({
+                center: [longitude, latitude],
+                bearing: stableHeading,
+                pitch: 65,
+                zoom: Math.max(map.getZoom(), 17),
+              });
+            }
 
             let minAwaY = Infinity;
             state.routeCoords.forEach((c) => {
@@ -535,7 +697,7 @@ export function initNavOS(maplibregl) {
               if (d < minAwaY) minAwaY = d;
             });
             if (minAwaY > 50) {
-              showToast("Recalcul de l'itinéraire...", "error");
+              showToast("Vous semblez vous éloigner de l’itinéraire", "error");
               state.origin = {
                 lat: latitude,
                 lon: longitude,
@@ -570,6 +732,8 @@ export function initNavOS(maplibregl) {
   if (endNavBtn)
     endNavBtn.addEventListener("click", () => {
       state.isNavigating = false;
+      state.autoFollow = false;
+      updateRecenterButton();
       if (state.watchId) navigator.geolocation.clearWatch(state.watchId);
       document.getElementById("sidePanel").classList.remove("nav-active");
       document.getElementById("navUI").classList.remove("active");
@@ -639,10 +803,12 @@ export function initNavOS(maplibregl) {
       resetViewBtns();
       viewBtns.map.classList.add("active");
       state.mapMode = "map";
-      if (map && map.getStyle().name !== "Dark Matter")
+      if (map && map.getStyle().name !== "Dark Matter") {
         map.setStyle(VECTOR_STYLE_URL);
-      else if (map && map.getLayer("3d-buildings"))
+      } else if (map && map.getLayer("3d-buildings")) {
         map.setLayoutProperty("3d-buildings", "visibility", "none");
+        bringRouteToFront();
+      }
       if (map) map.easeTo({ pitch: 0 });
     });
 
@@ -651,10 +817,12 @@ export function initNavOS(maplibregl) {
       resetViewBtns();
       viewBtns.v3d.classList.add("active");
       state.mapMode = "3d";
-      if (map && map.getStyle().name !== "Dark Matter")
+      if (map && map.getStyle().name !== "Dark Matter") {
         map.setStyle(VECTOR_STYLE_URL);
-      else if (map && map.getLayer("3d-buildings"))
+      } else if (map && map.getLayer("3d-buildings")) {
         map.setLayoutProperty("3d-buildings", "visibility", "visible");
+        bringRouteToFront();
+      }
       if (map) map.easeTo({ pitch: 60 });
     });
 

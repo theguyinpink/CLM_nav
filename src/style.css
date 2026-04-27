@@ -1233,3 +1233,22 @@ body.map-grabbing * {
     padding: 10px 12px;
   }
 }
+
+/* --- Patch visibilité guidage + route 3D --- */
+.nav-ui-container {
+  top: max(20px, env(safe-area-inset-top));
+  z-index: 1200;
+}
+
+@media (max-width: 768px) {
+  .nav-ui-container {
+    top: calc(72px + env(safe-area-inset-top));
+    width: calc(100% - 24px);
+    max-width: 420px;
+    max-height: calc(100vh - 92px - env(safe-area-inset-top));
+  }
+
+  .nav-ui-container.active {
+    transform: translateX(-50%) translateY(0);
+  }
+}
