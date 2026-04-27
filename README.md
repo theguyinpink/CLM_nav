@@ -62,3 +62,20 @@ La recherche d'adresses utilise maintenant TomTom Search API via `VITE_TOMTOM_AP
 - Bouton retour dans la barre de recherche pour fermer la recherche sans choisir de destination.
 - Limites de vitesse : récupérées via TomTom Routing avec `sectionType=speedLimit` quand disponible sur l'itinéraire.
 - Zones de danger : recherche TomTom Search autour de la position avec les mots-clés `zone de danger`, `radar`, `speed camera`. Selon les pays et la couverture TomTom, ces résultats peuvent être absents ou incomplets.
+
+## Logo CLMNav
+
+La navbar cherche automatiquement un fichier :
+
+```txt
+public/clmnav-logo.png
+```
+
+Crée un dossier `public` si besoin, puis place ton logo dedans avec exactement ce nom.
+Si le fichier n'existe pas, le texte `CLMNav` s'affiche en secours.
+
+## Itinéraires marche / vélo
+
+- Voiture : TomTom Routing + trafic live.
+- Marche / vélo : TomTom est tenté d'abord avec une requête allégée.
+- Si TomTom refuse le calcul, le projet utilise Valhalla comme fallback gratuit, sans revenir à OSRM.

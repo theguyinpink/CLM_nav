@@ -1,11 +1,11 @@
 /* ============================================================
-   NavOS — Premium Dark GPS Interface v1.2.1
+   CLMNav — Premium Dark GPS Interface v1.2.2
    Correctif Spécial GitHub Pages (Timeout, Erreurs, CartoDB Free)
    ============================================================ */
 
 
-export function initNavOS(maplibregl) {
-  console.log("🚀 Initialisation de CLM NAV..");
+export function initCLMNav(maplibregl) {
+  console.log("🚀 Initialisation de CLMNav...");
 
   // 1. ÉTATS & VARIABLES GLOBALES
   const state = {
@@ -1189,7 +1189,14 @@ export function initNavOS(maplibregl) {
     const oldFactor = state.trafficFactor;
     const oldDelay = state.trafficDelay;
     const oldSource = state.trafficSource;
-    await buildTrafficSegments(route.geometry.coordinates, route.duration);
+    if (state.mode === "car") {
+      await buildTrafficSegments(route.geometry.coordinates, route.duration);
+    } else {
+      state.trafficSegments = [{ coords: route.geometry.coordinates, color: "#7dd3fc", level: "Mode doux", ratio: 1 }];
+      state.trafficFactor = 1;
+      state.trafficDelay = 0;
+      state.trafficSource = state.mode === "bike" ? "vélo" : "marche";
+    }
     const opt = {
       key,
       coords: route.geometry.coordinates,
@@ -1241,6 +1248,97 @@ export function initNavOS(maplibregl) {
     return "car";
   };
 
+  const getValhallaCosting = () => {
+    if (state.mode === "bike") return "bicycle";
+    if (state.mode === "foot") return "pedestrian";
+    return "auto";
+  };
+
+  // Valhalla sert de secours gratuit pour les modes marche/vélo si TomTom refuse le calcul.
+  // Ça évite de revenir à OSRM tout en gardant un itinéraire fonctionnel.
+  const decodeValhallaPolyline = (encoded, precision = 6) => {
+    if (!encoded) return [];
+    let index = 0;
+    let lat = 0;
+    let lng = 0;
+    const coordinates = [];
+    const factor = Math.pow(10, precision);
+
+    while (index < encoded.length) {
+      let result = 0;
+      let shift = 0;
+      let byte = null;
+      do {
+        byte = encoded.charCodeAt(index++) - 63;
+        result |= (byte & 0x1f) << shift;
+        shift += 5;
+      } while (byte >= 0x20);
+      const dlat = result & 1 ? ~(result >> 1) : result >> 1;
+      lat += dlat;
+
+      result = 0;
+      shift = 0;
+      do {
+        byte = encoded.charCodeAt(index++) - 63;
+        result |= (byte & 0x1f) << shift;
+        shift += 5;
+      } while (byte >= 0x20);
+      const dlng = result & 1 ? ~(result >> 1) : result >> 1;
+      lng += dlng;
+
+      coordinates.push([lng / factor, lat / factor]);
+    }
+    return coordinates;
+  };
+
+  const decodeValhallaRoute = (trip, key = "active") => {
+    const legs = trip?.legs || [];
+    const coords = legs.flatMap((leg) => decodeValhallaPolyline(leg.shape, 6));
+    const summary = trip?.summary || {};
+    const steps = legs.flatMap((leg) => (leg.maneuvers || []).map((maneuver) => ({
+      maneuver: { instruction: maneuver.instruction || maneuver.verbal_pre_transition_instruction || "Continuez sur l’itinéraire" },
+      distance: Math.round((maneuver.length || 0) * 1000),
+    })));
+
+    return {
+      key,
+      geometry: { type: "LineString", coordinates: coords },
+      distance: Math.round((summary.length || 0) * 1000),
+      duration: Math.round(summary.time || 0),
+      durationWithTraffic: Math.round(summary.time || 0),
+      trafficDelay: 0,
+      legs: [{ steps }],
+      speedLimitSections: [],
+      sections: [],
+      raw: trip,
+      provider: "Valhalla",
+    };
+  };
+
+  const fetchValhallaRoute = async () => {
+    const payload = {
+      locations: [
+        { lat: state.origin.lat, lon: state.origin.lon },
+        { lat: state.destination.lat, lon: state.destination.lon },
+      ],
+      costing: getValhallaCosting(),
+      directions_options: { language: "fr-FR", units: "kilometers" },
+    };
+
+    const res = await fetch("https://valhalla1.openstreetmap.de/route", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const txt = await res.text().catch(() => "");
+      throw new Error(`Valhalla Routing HTTP ${res.status} ${txt}`);
+    }
+    const data = await res.json();
+    if (!data.trip) throw new Error("Valhalla n'a renvoyé aucun itinéraire");
+    return decodeValhallaRoute(data.trip, state.mode === "bike" ? "bike" : "foot");
+  };
+
   const decodeTomTomRoute = (route, key = "fastest") => {
     const points = route?.legs?.flatMap((leg) => leg.points || []) || [];
     const coords = points
@@ -1283,19 +1381,28 @@ export function initNavOS(maplibregl) {
     const key = getTomTomApiKey();
     if (!key) throw new Error("Clé TomTom manquante. Ajoute VITE_TOMTOM_API_KEY dans .env ou dans Vercel.");
 
+    const travelMode = getTomTomTravelMode();
     const params = new URLSearchParams({
       key,
-      traffic: "true",
-      routeType,
-      travelMode: getTomTomTravelMode(),
+      routeType: routeType === "shortest" && travelMode !== "car" ? "fastest" : routeType,
+      travelMode,
       maxAlternatives: String(maxAlternatives),
       instructionsType: "text",
       language: "fr-FR",
-      computeTravelTimeFor: "all",
       routeRepresentation: "polyline",
     });
-    params.append("sectionType", "traffic");
-    params.append("sectionType", "speedLimit");
+
+    // TomTom gère surtout le trafic et les vitesses en voiture.
+    // Sur marche/vélo, on garde une requête plus légère pour éviter les erreurs 400.
+    if (travelMode === "car") {
+      params.set("traffic", "true");
+      params.set("computeTravelTimeFor", "all");
+      params.append("sectionType", "traffic");
+      params.append("sectionType", "speedLimit");
+    } else {
+      params.set("traffic", "false");
+      params.set("computeTravelTimeFor", "none");
+    }
 
     const start = `${state.origin.lat},${state.origin.lon}`;
     const end = `${state.destination.lat},${state.destination.lon}`;
@@ -1311,6 +1418,30 @@ export function initNavOS(maplibregl) {
   };
 
   const getTomTomRoutePair = async () => {
+    // Voiture : TomTom complet avec trafic réel et alternatives.
+    // Marche/vélo : TomTom d'abord, puis fallback Valhalla si TomTom refuse le mode.
+    if (state.mode !== "car") {
+      try {
+        const routes = await fetchTomTomRoutes("fastest", 1);
+        const primary = routes[0];
+        const offset = {
+          ...primary,
+          key: state.mode === "bike" ? "bike-alt" : "foot-alt",
+          geometry: { type: "LineString", coordinates: makeDisplayOffsetCoords(primary.geometry.coordinates, 16) },
+        };
+        return { fastest: primary, shortest: offset };
+      } catch (tomtomError) {
+        console.warn("TomTom marche/vélo indisponible, fallback Valhalla :", tomtomError);
+        const primary = await fetchValhallaRoute();
+        const offset = {
+          ...primary,
+          key: state.mode === "bike" ? "bike-alt" : "foot-alt",
+          geometry: { type: "LineString", coordinates: makeDisplayOffsetCoords(primary.geometry.coordinates, 16) },
+        };
+        return { fastest: primary, shortest: offset };
+      }
+    }
+
     const fastestRoutes = await fetchTomTomRoutes("fastest", 2);
     let fastest = fastestRoutes[0];
     let alternative = fastestRoutes.find((route) => !routesLookSame(route, fastest));
@@ -1750,7 +1881,7 @@ export function initNavOS(maplibregl) {
       stopTrafficLiveRefresh();
       if (map) map.remove();
     } catch (error) {
-      console.warn("Nettoyage CLM NAV incomplet :", error);
+      console.warn("Nettoyage CLMNav incomplet :", error);
     }
   };
 }

@@ -1,5 +1,5 @@
 /* ============================================================
-   NavOS — Premium Dark GPS Interface
+   CLMNav — Premium Dark GPS Interface
    Apple Maps Dark Mode Inspired (V1.2.1)
    ============================================================ */
 
@@ -1659,4 +1659,35 @@ body.route-ready .map-controls .control-group {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* CLMNav logo slot */
+.brand-logo-slot {
+  min-width: 74px;
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 8px;
+}
+.brand-logo-slot img {
+  max-width: 96px;
+  max-height: 34px;
+  object-fit: contain;
+  display: block;
+}
+.brand-logo-slot span {
+  font-weight: 800;
+  letter-spacing: -.04em;
+  color: rgba(255,255,255,.92);
+}
+@media (max-width: 760px) {
+  .brand-logo-slot {
+    min-width: 42px;
+    padding: 0 4px;
+  }
+  .brand-logo-slot img {
+    max-width: 72px;
+    max-height: 30px;
+  }
 }
