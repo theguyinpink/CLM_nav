@@ -697,59 +697,193 @@ export function initNavOS(maplibregl) {
     document.body.appendChild(recenterBtn);
   };
 
-  // 8. AUTOCOMPLETE NOMINATIM
-  const searchAddress = async (query, container, type) => {
-    if (query.length < 3) return container.classList.remove("open");
-    try {
-      const res = await fetch(
-        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=5&countrycodes=FR`,
-      );
-      const data = await res.json();
-      container.innerHTML = "";
-      if (!data.length) return container.classList.remove("open");
-      data.forEach((place) => {
-        const item = document.createElement("div");
-        item.className = "autocomplete-item";
-        const parts = place.display_name.split(", ");
-        item.innerHTML = `<div class="autocomplete-item-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="10" r="3"/><path d="M21 10c0 7-9 13-9 13S3 17 3 10a9 9 0 0 1 18 0z"/></svg></div><div class="autocomplete-item-text"><div class="autocomplete-item-name">${parts[0]}</div><div class="autocomplete-item-addr">${parts.slice(1, 3).join(", ")}</div></div>`;
-        item.addEventListener("click", () => {
-          const lat = parseFloat(place.lat),
-            lon = parseFloat(place.lon);
-          if (type === "origin") {
-            state.origin = { lat, lon, name: parts[0] };
-            document.getElementById("originInput").value = parts[0];
-            const navOriginInput = document.getElementById("navOriginInput");
-            if (navOriginInput) navOriginInput.value = parts[0];
-            setMarker("origin", lat, lon, parts[0]);
-            if (state.destination) calculateRoute();
-          }
-          if (type === "dest") {
-            state.destination = { lat, lon, name: parts[0] };
-            document.getElementById("destInput").value = parts[0];
-            const navSearchInput = document.getElementById("navSearchInput");
-            if (navSearchInput) navSearchInput.value = parts[0];
-            document.getElementById("searchNav")?.classList.add("expanded");
-            document.getElementById("clearDest").style.display = "flex";
-            setMarker("dest", lat, lon, parts[0]);
-            calculateRoute();
-          }
-          container.classList.remove("open");
+  // 8. AUTOCOMPLETE TOMTOM SEARCH — plus précis que Nominatim pour les adresses
+  const TOMTOM_API_KEY = import.meta.env.VITE_TOMTOM_API_KEY;
 
-          if (map && state.origin && state.destination)
-            map.fitBounds(
-              new maplibregl.LngLatBounds(
-                [state.origin.lon, state.origin.lat],
-                [state.destination.lon, state.destination.lat],
-              ),
-              { padding: 80 },
-            );
-          else if (map) map.flyTo({ center: [lon, lat], zoom: 14 });
-        });
-        container.appendChild(item);
+  const escapeHTML = (value = "") =>
+    String(value)
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#039;");
+
+  const formatTomTomResult = (result) => {
+    const position = result.position || result.viewport?.topLeftPoint;
+    if (!position || !Number.isFinite(position.lat) || !Number.isFinite(position.lon)) return null;
+
+    const address = result.address || {};
+    const poi = result.poi || {};
+    const name =
+      poi.name ||
+      address.freeformAddress ||
+      address.streetName ||
+      address.municipality ||
+      result.type ||
+      "Adresse";
+
+    const details = [
+      address.streetNumber && address.streetName ? `${address.streetNumber} ${address.streetName}` : null,
+      !address.streetNumber ? address.streetName : null,
+      address.postalCode,
+      address.municipality,
+      address.countrySubdivisionName,
+    ].filter(Boolean);
+
+    return {
+      lat: position.lat,
+      lon: position.lon,
+      name,
+      address: address.freeformAddress || details.join(", ") || name,
+      type: result.type || poi.categories?.[0] || "Adresse",
+      score: result.score || 0,
+      source: "tomtom",
+    };
+  };
+
+  const searchTomTomAddress = async (query) => {
+    if (!TOMTOM_API_KEY || TOMTOM_API_KEY === "TA_CLE_TOMTOM_ICI") return [];
+
+    const params = new URLSearchParams({
+      key: TOMTOM_API_KEY,
+      limit: "8",
+      countrySet: "FR",
+      language: "fr-FR",
+      typeahead: "true",
+      minFuzzyLevel: "1",
+      maxFuzzyLevel: "2",
+      view: "Unified",
+      idxSet: "Addr,POI,Geo,Str,Xstr",
+    });
+
+    // Biais de recherche autour de la position utilisateur si elle est connue.
+    // Ça rend les résultats beaucoup plus pertinents pour les recherches locales.
+    if (state.userLocation?.lat && state.userLocation?.lon) {
+      params.set("lat", String(state.userLocation.lat));
+      params.set("lon", String(state.userLocation.lon));
+      params.set("radius", "50000");
+    }
+
+    const res = await fetch(
+      `https://api.tomtom.com/search/2/search/${encodeURIComponent(query)}.json?${params.toString()}`,
+    );
+    if (!res.ok) throw new Error(`TomTom Search ${res.status}`);
+    const data = await res.json();
+    return (data.results || []).map(formatTomTomResult).filter(Boolean);
+  };
+
+  const searchNominatimFallback = async (query) => {
+    const res = await fetch(
+      `https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&q=${encodeURIComponent(query)}&limit=6&countrycodes=FR`,
+    );
+    const data = await res.json();
+    return (data || []).map((place) => {
+      const address = place.address || {};
+      const mainName =
+        address.house_number && address.road
+          ? `${address.house_number} ${address.road}`
+          : place.name || address.road || place.display_name.split(", ")[0];
+      return {
+        lat: parseFloat(place.lat),
+        lon: parseFloat(place.lon),
+        name: mainName,
+        address: place.display_name,
+        type: place.type || place.class || "Adresse",
+        score: Number(place.importance || 0),
+        source: "nominatim",
+      };
+    }).filter((item) => Number.isFinite(item.lat) && Number.isFinite(item.lon));
+  };
+
+  const selectAddress = (place, type, container) => {
+    const lat = place.lat;
+    const lon = place.lon;
+    const label = place.name || place.address || "Adresse";
+
+    if (type === "origin") {
+      state.origin = { lat, lon, name: label };
+      const legacyOriginInput = document.getElementById("originInput");
+      if (legacyOriginInput) legacyOriginInput.value = label;
+      const navOriginInput = document.getElementById("navOriginInput");
+      if (navOriginInput) navOriginInput.value = label;
+      setMarker("origin", lat, lon, label);
+      if (state.destination) calculateRoute();
+    }
+
+    if (type === "dest") {
+      state.destination = { lat, lon, name: label };
+      const legacyDestInput = document.getElementById("destInput");
+      if (legacyDestInput) legacyDestInput.value = label;
+      const navSearchInput = document.getElementById("navSearchInput");
+      if (navSearchInput) navSearchInput.value = label;
+      document.getElementById("searchNav")?.classList.add("expanded");
+      const clearDest = document.getElementById("clearDest");
+      if (clearDest) clearDest.style.display = "flex";
+      setMarker("dest", lat, lon, label);
+      calculateRoute();
+    }
+
+    container?.classList.remove("open");
+
+    if (map && state.origin && state.destination) {
+      map.fitBounds(
+        new maplibregl.LngLatBounds(
+          [state.origin.lon, state.origin.lat],
+          [state.destination.lon, state.destination.lat],
+        ),
+        { padding: 110, maxZoom: 15 },
+      );
+    } else if (map) {
+      map.flyTo({ center: [lon, lat], zoom: 16 });
+    }
+  };
+
+  const renderSearchResults = (results, container, type, sourceLabelFallback = "") => {
+    container.innerHTML = "";
+    if (!results.length) {
+      container.innerHTML = `<div class="autocomplete-item muted">Aucun résultat précis trouvé</div>`;
+      return;
+    }
+
+    results.forEach((place) => {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "autocomplete-item";
+      item.innerHTML = `<div class="autocomplete-item-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="10" r="3"/><path d="M21 10c0 7-9 13-9 13S3 17 3 10a9 9 0 0 1 18 0z"/></svg></div><div class="autocomplete-item-text"><div class="autocomplete-item-name">${escapeHTML(place.name)}</div><div class="autocomplete-item-addr">${escapeHTML(place.address)}</div></div><span class="autocomplete-source">${place.source === "tomtom" ? "TomTom" : sourceLabelFallback || "OSM"}</span>`;
+      item.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        selectAddress(place, type, container);
       });
-      container.classList.add("open");
+      container.appendChild(item);
+    });
+    container.classList.add("open");
+  };
+
+  const searchAddress = async (query, container, type) => {
+    if (!container) return;
+    const cleanQuery = query.trim();
+    if (cleanQuery.length < 3) return container.classList.remove("open");
+
+    container.innerHTML = `<div class="autocomplete-item muted">Recherche précise…</div>`;
+    container.classList.add("open");
+
+    try {
+      let results = await searchTomTomAddress(cleanQuery);
+
+      // Fallback uniquement si TomTom n'est pas configuré ou ne répond pas.
+      if (!results.length) results = await searchNominatimFallback(cleanQuery);
+
+      renderSearchResults(results, container, type);
     } catch (e) {
       console.error("API Recherche:", e);
+      try {
+        const fallback = await searchNominatimFallback(cleanQuery);
+        renderSearchResults(fallback, container, type, "OSM");
+      } catch (fallbackError) {
+        console.error("Fallback recherche:", fallbackError);
+        container.innerHTML = `<div class="autocomplete-item muted">Recherche indisponible</div>`;
+      }
     }
   };
 

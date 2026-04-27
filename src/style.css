@@ -1538,3 +1538,40 @@ body.route-ready .map-controls .control-group {
   .navbar-mode-row .nav-mode-btn { min-width: 0; flex: 1; height: 36px; font-size: 10px; padding: 0 8px; }
   .navbar-mode-row .nav-mode-btn span { display: inline; }
 }
+
+/* Patch recherche précise TomTom */
+.autocomplete-item {
+  width: 100%;
+  background: transparent;
+  color: inherit;
+  border-left: 0;
+  border-right: 0;
+  border-top: 0;
+  text-align: left;
+  font: inherit;
+}
+.autocomplete-item.muted {
+  color: var(--text-muted);
+  cursor: default;
+  justify-content: center;
+}
+.autocomplete-source {
+  margin-left: auto;
+  padding: 4px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  color: rgba(255,255,255,.58);
+  background: rgba(255,255,255,.07);
+  border: 1px solid rgba(255,255,255,.08);
+  flex-shrink: 0;
+}
+.autocomplete-item-text {
+  min-width: 0;
+  flex: 1;
+}
+.autocomplete-item-name,
+.autocomplete-item-addr {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

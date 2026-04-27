@@ -52,3 +52,7 @@ Avec Vite, les variables `VITE_...` restent visibles côté navigateur après bu
 - Durées récupérées depuis TomTom avec trafic.
 - Conservation du trafic live et refresh toutes les 60 secondes.
 - Stabilisation de la couche bâtiments 3D avec détection/retry du source-layer MapLibre.
+
+## Recherche d'adresse précise
+
+La recherche d'adresses utilise maintenant TomTom Search API via `VITE_TOMTOM_API_KEY` pour obtenir des résultats plus précis que Nominatim. Si la clé TomTom n'est pas configurée ou si l'API ne répond pas, le projet repasse automatiquement en fallback OpenStreetMap/Nominatim.
