@@ -35,6 +35,10 @@ export function initNavOS(maplibregl) {
     lastAutoRerouteAt: 0,
     isRecalculatingTraffic: false,
     trafficSource: null,
+    speedLimitSections: [],
+    currentSpeedLimit: null,
+    dangerZones: [],
+    radarRefreshAt: 0,
   };
 
   let map;
@@ -183,6 +187,9 @@ export function initNavOS(maplibregl) {
       }
       if (map?.getSource("route-traffic")) {
         map.getSource("route-traffic").setData(trafficFeature());
+      }
+      if (map?.getSource("danger-zones")) {
+        map.getSource("danger-zones").setData(dangerZonesFeature());
       }
       ["fastest", "shortest"].forEach((key) => {
         if (map?.getSource(`route-${key}`)) {
@@ -562,6 +569,115 @@ export function initNavOS(maplibregl) {
     state.trafficFactor = Math.max(1, Math.min(2.4, factor));
     state.trafficDelay = Math.max(0, duration * (state.trafficFactor - 1));
     state.trafficSource = usedLiveTraffic ? "TomTom live" : "simulation";
+  };
+
+
+  const parseSpeedLimitSections = (route) => {
+    const points = route?.legs?.flatMap((leg) => leg.points || []) || [];
+    return (route?.sections || [])
+      .filter((section) => section.sectionType === "SPEED_LIMIT" && Number.isFinite(section.maxSpeedLimitInKmh))
+      .map((section) => ({
+        startPointIndex: section.startPointIndex ?? 0,
+        endPointIndex: section.endPointIndex ?? section.startPointIndex ?? 0,
+        speed: section.maxSpeedLimitInKmh,
+        start: points[section.startPointIndex],
+        end: points[section.endPointIndex],
+      }))
+      .filter((section) => section.start && section.end);
+  };
+
+  const findClosestRouteIndex = (lat, lon, coords = state.routeCoords) => {
+    if (!coords?.length) return -1;
+    let bestIndex = 0;
+    let bestDistance = Infinity;
+    coords.forEach((coord, index) => {
+      const d = getDistance(lat, lon, coord[1], coord[0]);
+      if (d < bestDistance) { bestDistance = d; bestIndex = index; }
+    });
+    return bestDistance < 80 ? bestIndex : -1;
+  };
+
+  const updateSpeedLimitUI = (speed) => {
+    state.currentSpeedLimit = speed || null;
+    const sign = document.getElementById("speedLimitSign");
+    const navSpeed = document.getElementById("navSpeedLimit");
+    const hud = document.getElementById("safetyHud");
+    if (hud) hud.classList.toggle("active", state.isNavigating || !!speed || !!state.dangerZones.length);
+    if (sign) sign.querySelector("span").textContent = speed ? String(Math.round(speed)) : "--";
+    if (navSpeed) navSpeed.textContent = speed ? String(Math.round(speed)) + " km/h" : "limite —";
+  };
+
+  const updateSpeedLimitFromPosition = (lat, lon) => {
+    const sections = state.speedLimitSections || [];
+    if (!sections.length) return updateSpeedLimitUI(null);
+    const idx = findClosestRouteIndex(lat, lon);
+    if (idx < 0) return updateSpeedLimitUI(null);
+    const match = sections.find((section) => idx >= section.startPointIndex && idx <= section.endPointIndex);
+    updateSpeedLimitUI(match?.speed || null);
+  };
+
+  const updateDangerZoneUI = () => {
+    const text = document.getElementById("dangerZoneText");
+    const navRadar = document.getElementById("navRadarInfo");
+    const hud = document.getElementById("safetyHud");
+    if (hud) hud.classList.toggle("active", state.isNavigating || !!state.currentSpeedLimit || !!state.dangerZones.length);
+    const count = state.dangerZones?.length || 0;
+    const label = count ? count + " zone" + (count > 1 ? "s" : "") + " autour de vous" : "Aucune zone proche";
+    if (text) text.textContent = label;
+    if (navRadar) navRadar.textContent = count ? "zones " + count : "zones —";
+    if (map?.getSource("danger-zones")) map.getSource("danger-zones").setData(dangerZonesFeature());
+  };
+
+  const searchDangerZonesNearby = async (lat, lon, force = false) => {
+    const key = getTomTomApiKey();
+    if (!key || state.mode !== "car") return;
+    const now = Date.now();
+    if (!force && now - state.radarRefreshAt < 45000) return;
+    state.radarRefreshAt = now;
+
+    try {
+      const queries = ["zone de danger", "radar", "speed camera"];
+      const all = [];
+      for (const query of queries) {
+        const params = new URLSearchParams({
+          key,
+          lat: String(lat),
+          lon: String(lon),
+          radius: "3500",
+          limit: "8",
+          language: "fr-FR",
+        });
+        const res = await fetch("https://api.tomtom.com/search/2/poiSearch/" + encodeURIComponent(query) + ".json?" + params.toString());
+        if (!res.ok) continue;
+        const data = await res.json();
+        for (const item of data.results || []) {
+          const p = item.position;
+          if (!p || !Number.isFinite(p.lat) || !Number.isFinite(p.lon)) continue;
+          const distance = getDistance(lat, lon, p.lat, p.lon);
+          all.push({
+            id: item.id || String(p.lat) + "," + String(p.lon),
+            name: item.poi?.name || "Zone de danger",
+            lat: p.lat,
+            lon: p.lon,
+            distance,
+          });
+        }
+      }
+      const unique = [];
+      const seen = new Set();
+      all.sort((a, b) => a.distance - b.distance).forEach((zone) => {
+        const zoneKey = zone.lat.toFixed(4) + "," + zone.lon.toFixed(4);
+        if (!seen.has(zoneKey)) { seen.add(zoneKey); unique.push(zone); }
+      });
+      state.dangerZones = unique.slice(0, 8);
+      updateDangerZoneUI();
+      const nearest = state.dangerZones[0];
+      if (nearest && nearest.distance < 800 && state.isNavigating) {
+        showToast("Zone de danger à " + formatDistance(nearest.distance), "error");
+      }
+    } catch (error) {
+      console.warn("Recherche zones de danger indisponible :", error);
+    }
   };
 
   const updateTrafficUI = () => {
@@ -956,11 +1072,26 @@ export function initNavOS(maplibregl) {
     });
 
   // 9. ROUTAGE TOMTOM — deux tracés visibles puis sélection sur la carte
+  document.getElementById("searchBackBtn")?.addEventListener("click", () => {
+    const searchNav = document.getElementById("searchNav");
+    const destSuggestions = document.getElementById("navDestSuggestions");
+    const originSuggestions = document.getElementById("navOriginSuggestions");
+    searchNav?.classList.remove("focused");
+    if (!state.destination) searchNav?.classList.remove("expanded");
+    if (destSuggestions) destSuggestions.innerHTML = "";
+    if (originSuggestions) originSuggestions.innerHTML = "";
+    document.activeElement?.blur?.();
+  });
+
   const clearRouteVisuals = () => {
     state.routeCoords = [];
     state.routeSummary = null;
     state.routeSteps = [];
     state.routeOptions = {};
+    state.speedLimitSections = [];
+    state.dangerZones = [];
+    updateSpeedLimitUI(null);
+    updateDangerZoneUI();
     state.selectedRouteKey = null;
     state.trafficSegments = [];
     if (map?.getSource("route")) map.getSource("route").setData(routeFeature());
@@ -1069,6 +1200,7 @@ export function initNavOS(maplibregl) {
       trafficFactor: route.durationWithTraffic && route.duration ? Math.max(1, route.durationWithTraffic / route.duration) : state.trafficFactor,
       trafficDelay: route.trafficDelay ?? state.trafficDelay,
       steps: route.legs?.[0]?.steps || [],
+      speedLimitSections: route.speedLimitSections || [],
     };
     state.trafficSegments = oldSegments;
     state.trafficFactor = oldFactor;
@@ -1141,6 +1273,8 @@ export function initNavOS(maplibregl) {
           })),
         },
       ],
+      speedLimitSections: parseSpeedLimitSections(route),
+      sections: route?.sections || [],
       raw: route,
     };
   };
@@ -1160,6 +1294,8 @@ export function initNavOS(maplibregl) {
       computeTravelTimeFor: "all",
       routeRepresentation: "polyline",
     });
+    params.append("sectionType", "traffic");
+    params.append("sectionType", "speedLimit");
 
     const start = `${state.origin.lat},${state.origin.lon}`;
     const end = `${state.destination.lat},${state.destination.lon}`;
@@ -1343,6 +1479,7 @@ export function initNavOS(maplibregl) {
       updateRecenterButton();
       document.getElementById("sidePanel").classList.add("nav-active");
       document.getElementById("navUI").classList.add("active");
+      document.getElementById("safetyHud")?.classList.add("active");
 
       document.getElementById("navDistLeft").textContent = formatDistance(
         state.routeSummary.dist,
@@ -1394,6 +1531,8 @@ export function initNavOS(maplibregl) {
           const stableHeading = smoothHeading(targetHeading ?? state.smoothedHeading);
           updateUserMarker(latitude, longitude, stableHeading);
           state.userLocation = current;
+          updateSpeedLimitFromPosition(latitude, longitude);
+          searchDangerZonesNearby(latitude, longitude);
 
           if (state.isNavigating && map) {
             if (state.autoFollow) {
@@ -1455,6 +1594,7 @@ export function initNavOS(maplibregl) {
       stopTrafficLiveRefresh();
       document.getElementById("sidePanel").classList.remove("nav-active");
       document.getElementById("navUI").classList.remove("active");
+      document.getElementById("safetyHud")?.classList.remove("active");
       document.getElementById("viewMap").click();
       if (map)
         map.flyTo({

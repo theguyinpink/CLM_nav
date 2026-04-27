@@ -56,3 +56,9 @@ Avec Vite, les variables `VITE_...` restent visibles côté navigateur après bu
 ## Recherche d'adresse précise
 
 La recherche d'adresses utilise maintenant TomTom Search API via `VITE_TOMTOM_API_KEY` pour obtenir des résultats plus précis que Nominatim. Si la clé TomTom n'est pas configurée ou si l'API ne répond pas, le projet repasse automatiquement en fallback OpenStreetMap/Nominatim.
+
+## Patch sécurité conduite
+
+- Bouton retour dans la barre de recherche pour fermer la recherche sans choisir de destination.
+- Limites de vitesse : récupérées via TomTom Routing avec `sectionType=speedLimit` quand disponible sur l'itinéraire.
+- Zones de danger : recherche TomTom Search autour de la position avec les mots-clés `zone de danger`, `radar`, `speed camera`. Selon les pays et la couverture TomTom, ces résultats peuvent être absents ou incomplets.
