@@ -30,6 +30,11 @@ export function initNavOS(maplibregl) {
     lastGpsPoint: null,
     smoothedHeading: 0,
     ignoreCameraEvent: false,
+    trafficRefreshId: null,
+    lastTrafficAlertAt: 0,
+    lastAutoRerouteAt: 0,
+    isRecalculatingTraffic: false,
+    trafficSource: null,
   };
 
   let map;
@@ -415,19 +420,69 @@ export function initNavOS(maplibregl) {
   const getRoutingService = () =>
     state.mode === "car" ? "car" : state.mode === "bike" ? "bike" : "foot";
 
-  const buildTrafficSegments = (coords, duration) => {
+  const getTomTomApiKey = () => {
+    // 👉 Mets ta clé TomTom dans le fichier .env : VITE_TOMTOM_API_KEY=ta_cle_ici
+    // En dépannage rapide, tu peux aussi remplacer "" ci-dessous par ta clé, mais .env est recommandé.
+    return import.meta.env.VITE_TOMTOM_API_KEY || "";
+  };
+
+  const fetchTomTomTrafficAtPoint = async (lat, lon) => {
+    const key = getTomTomApiKey();
+    if (!key) return null;
+
+    const url = `https://api.tomtom.com/traffic/services/4/flowSegmentData/absolute/10/json?point=${lat},${lon}&unit=KMPH&key=${key}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`TomTom Traffic HTTP ${res.status}`);
+    const data = await res.json();
+    const flow = data?.flowSegmentData;
+    if (!flow?.currentSpeed || !flow?.freeFlowSpeed) return null;
+
+    const ratio = Math.max(0.05, Math.min(1.2, flow.currentSpeed / flow.freeFlowSpeed));
+    let level = "fluid";
+    let color = "#34d399";
+    if (ratio < 0.45) {
+      level = "heavy";
+      color = "#ef4444";
+    } else if (ratio < 0.75) {
+      level = "slow";
+      color = "#f59e0b";
+    }
+
+    return {
+      level,
+      color,
+      ratio,
+      factor: Math.max(1, 1 / ratio),
+      currentSpeed: flow.currentSpeed,
+      freeFlowSpeed: flow.freeFlowSpeed,
+      confidence: flow.confidence ?? 0,
+    };
+  };
+
+  const simulatedTrafficAtSegment = (part, i) => {
+    const nowBucket = Math.floor(Date.now() / 60000);
+    const seed = Math.abs(
+      Math.sin((part[0][0] * 91.7 + part[0][1] * 53.3 + nowBucket * 0.13 + i) * 12.9898),
+    );
+    if (seed > 0.78) return { level: "heavy", factor: 1.65, color: "#ef4444", simulated: true };
+    if (seed > 0.55) return { level: "slow", factor: 1.28, color: "#f59e0b", simulated: true };
+    return { level: "fluid", factor: 1.02, color: "#34d399", simulated: true };
+  };
+
+  const buildTrafficSegments = async (coords, duration) => {
     if (!coords || coords.length < 2 || state.mode !== "car") {
       state.trafficSegments = [];
       state.trafficFactor = 1;
       state.trafficDelay = 0;
+      state.trafficSource = null;
       return;
     }
 
-    const nowBucket = Math.floor(Date.now() / 60000);
-    const step = Math.max(2, Math.floor(coords.length / 14));
+    const step = Math.max(2, Math.floor(coords.length / 12));
     const features = [];
     let weightedFactor = 0;
     let weightedLength = 0;
+    let usedLiveTraffic = false;
 
     for (let i = 0; i < coords.length - 1; i += step) {
       const part = coords.slice(i, Math.min(coords.length, i + step + 1));
@@ -438,34 +493,38 @@ export function initNavOS(maplibregl) {
         segmentLength += getDistance(part[j - 1][1], part[j - 1][0], part[j][1], part[j][0]);
       }
 
-      const seed = Math.abs(Math.sin((part[0][0] * 91.7 + part[0][1] * 53.3 + nowBucket * 0.13 + i) * 12.9898));
-      let level = "fluid";
-      let factor = 1.02;
-      let color = "#34d399";
-
-      if (seed > 0.78) {
-        level = "heavy";
-        factor = 1.65;
-        color = "#ef4444";
-      } else if (seed > 0.55) {
-        level = "slow";
-        factor = 1.28;
-        color = "#f59e0b";
+      let traffic = null;
+      try {
+        const mid = part[Math.floor(part.length / 2)];
+        traffic = await fetchTomTomTrafficAtPoint(mid[1], mid[0]);
+        if (traffic) usedLiveTraffic = true;
+      } catch (error) {
+        console.warn("TomTom Traffic indisponible sur un segment, fallback simulation :", error);
       }
 
-      weightedFactor += factor * segmentLength;
+      if (!traffic) traffic = simulatedTrafficAtSegment(part, i);
+
+      weightedFactor += traffic.factor * segmentLength;
       weightedLength += segmentLength;
       features.push({
         type: "Feature",
-        properties: { level, factor, color },
+        properties: {
+          level: traffic.level,
+          factor: traffic.factor,
+          color: traffic.color,
+          live: !traffic.simulated,
+          currentSpeed: traffic.currentSpeed || null,
+          freeFlowSpeed: traffic.freeFlowSpeed || null,
+        },
         geometry: { type: "LineString", coordinates: part },
       });
     }
 
     const factor = weightedLength > 0 ? weightedFactor / weightedLength : 1;
     state.trafficSegments = features;
-    state.trafficFactor = Math.max(1, factor);
+    state.trafficFactor = Math.max(1, Math.min(2.4, factor));
     state.trafficDelay = Math.max(0, duration * (state.trafficFactor - 1));
+    state.trafficSource = usedLiveTraffic ? "TomTom live" : "simulation";
   };
 
   const updateTrafficUI = () => {
@@ -479,7 +538,8 @@ export function initNavOS(maplibregl) {
     else if (delayMin >= 10) label = "bouchons +" + delayMin + " min";
     else if (delayMin >= 3) label = "ralenti +" + delayMin + " min";
 
-    if (status) status.textContent = "Trafic : " + label;
+    const source = state.trafficSource ? ` (${state.trafficSource})` : "";
+    if (status) status.textContent = "Trafic : " + label + source;
     if (navTraffic) navTraffic.textContent = "trafic " + label;
     if (icon) {
       icon.classList.remove("traffic-good", "traffic-medium", "traffic-heavy");
@@ -790,11 +850,12 @@ export function initNavOS(maplibregl) {
     updateTrafficUI();
   };
 
-  const makeRouteOption = (key, route) => {
+  const makeRouteOption = async (key, route) => {
     const oldSegments = state.trafficSegments;
     const oldFactor = state.trafficFactor;
     const oldDelay = state.trafficDelay;
-    buildTrafficSegments(route.geometry.coordinates, route.duration);
+    const oldSource = state.trafficSource;
+    await buildTrafficSegments(route.geometry.coordinates, route.duration);
     const opt = {
       key,
       coords: route.geometry.coordinates,
@@ -809,6 +870,7 @@ export function initNavOS(maplibregl) {
     state.trafficSegments = oldSegments;
     state.trafficFactor = oldFactor;
     state.trafficDelay = oldDelay;
+    state.trafficSource = oldSource;
     return opt;
   };
 
@@ -853,7 +915,11 @@ export function initNavOS(maplibregl) {
       if (data.code !== "Ok" || !data.routes?.length) throw new Error("Réponse OSRM invalide");
       const fastest = data.routes.reduce((best, current) => current.duration < best.duration ? current : best);
       const shortest = data.routes.reduce((best, current) => current.distance < best.distance ? current : best);
-      state.routeOptions = { fastest: makeRouteOption("fastest", fastest), shortest: makeRouteOption("shortest", shortest) };
+      const [fastestOption, shortestOption] = await Promise.all([
+        makeRouteOption("fastest", fastest),
+        makeRouteOption("shortest", shortest),
+      ]);
+      state.routeOptions = { fastest: fastestOption, shortest: shortestOption };
       if (map) {
         injectCustomLayers();
         restoreRouteData();
@@ -895,6 +961,76 @@ export function initNavOS(maplibregl) {
       if (state.origin && state.destination) calculateRoute();
     });
   });
+
+
+  const maybeAlertTraffic = (opt = state.routeOptions?.[state.selectedRouteKey]) => {
+    if (!opt || state.mode !== "car") return;
+    const delayMin = Math.round((opt.trafficDelay || 0) / 60);
+    const now = Date.now();
+    if (delayMin >= 5 && now - state.lastTrafficAlertAt > 90000) {
+      state.lastTrafficAlertAt = now;
+      showToast(`Trafic dense détecté : +${delayMin} min`, "error");
+      const navNextStreet = document.getElementById("navNextStreet");
+      if (navNextStreet) navNextStreet.textContent = `Trafic dense sur votre trajet (+${delayMin} min)`;
+    }
+  };
+
+  const chooseBestRouteWithTraffic = () => {
+    const options = Object.values(state.routeOptions || {});
+    if (!options.length) return null;
+    return options.reduce((best, opt) =>
+      (opt.durationWithTraffic || opt.duration) < (best.durationWithTraffic || best.duration) ? opt : best,
+    );
+  };
+
+  const refreshTrafficForCurrentRoute = async ({ allowReroute = false } = {}) => {
+    if (!state.routeOptions?.[state.selectedRouteKey] || state.isRecalculatingTraffic) return;
+    if (state.mode !== "car") return;
+    state.isRecalculatingTraffic = true;
+    try {
+      const key = state.selectedRouteKey;
+      const opt = state.routeOptions[key];
+      await buildTrafficSegments(opt.coords, opt.duration);
+      opt.trafficSegments = [...state.trafficSegments];
+      opt.trafficFactor = state.trafficFactor;
+      opt.trafficDelay = state.trafficDelay;
+      opt.durationWithTraffic = adjustedDuration(opt.duration);
+
+      if (state.selectedRouteKey === key) selectRouteOption(key);
+      maybeAlertTraffic(opt);
+
+      const delayMin = Math.round((opt.trafficDelay || 0) / 60);
+      const now = Date.now();
+      if (allowReroute && delayMin >= 8 && now - state.lastAutoRerouteAt > 120000) {
+        state.lastAutoRerouteAt = now;
+        showToast("Bouchon important : recalcul automatique…", "error");
+        if (state.userLocation) state.origin = { ...state.userLocation, name: "Ma position" };
+        await calculateRoute();
+        const best = chooseBestRouteWithTraffic();
+        if (best) selectRouteOption(best.key);
+      }
+    } catch (error) {
+      console.warn("Refresh trafic impossible :", error);
+    } finally {
+      state.isRecalculatingTraffic = false;
+    }
+  };
+
+  const startTrafficLiveRefresh = () => {
+    if (state.trafficRefreshId) clearInterval(state.trafficRefreshId);
+    refreshTrafficForCurrentRoute({ allowReroute: true });
+    state.trafficRefreshId = setInterval(() => {
+      refreshTrafficForCurrentRoute({ allowReroute: true });
+    }, 60000);
+  };
+
+  const stopTrafficLiveRefresh = () => {
+    if (state.trafficRefreshId) {
+      clearInterval(state.trafficRefreshId);
+      state.trafficRefreshId = null;
+    }
+  };
+
   // 10. NAVIGATION TEMPS RÉEL (Geoloc sécurisée)
   const startNavigation = () => {
       if (!navigator.geolocation) return showToast("GPS non supporté", "error");
@@ -917,6 +1053,8 @@ export function initNavOS(maplibregl) {
           ? state.routeSteps[0].maneuver.instruction
           : "Continuez sur l’itinéraire";
       updateTrafficUI();
+      maybeAlertTraffic();
+      startTrafficLiveRefresh();
 
       document.getElementById("view3D").click(); // Auto 3D
       if (map) {
@@ -931,7 +1069,7 @@ export function initNavOS(maplibregl) {
       }
 
       state.watchId = navigator.geolocation.watchPosition(
-        (pos) => {
+        async (pos) => {
           const { latitude, longitude, heading } = pos.coords;
           const current = { lat: latitude, lon: longitude };
           let targetHeading = Number.isFinite(heading) && heading >= 0 ? heading : null;
@@ -977,7 +1115,7 @@ export function initNavOS(maplibregl) {
                 lon: longitude,
                 name: "Ma position",
               };
-              calculateRoute();
+              await calculateRoute();
             } else {
               const remain = Math.max(
                 0,
@@ -1012,6 +1150,7 @@ export function initNavOS(maplibregl) {
       state.autoFollow = false;
       updateRecenterButton();
       if (state.watchId) navigator.geolocation.clearWatch(state.watchId);
+      stopTrafficLiveRefresh();
       document.getElementById("sidePanel").classList.remove("nav-active");
       document.getElementById("navUI").classList.remove("active");
       document.getElementById("viewMap").click();
@@ -1160,6 +1299,7 @@ export function initNavOS(maplibregl) {
       if (state.watchId !== null && navigator.geolocation) {
         navigator.geolocation.clearWatch(state.watchId);
       }
+      stopTrafficLiveRefresh();
       if (map) map.remove();
     } catch (error) {
       console.warn("Nettoyage NavOS incomplet :", error);

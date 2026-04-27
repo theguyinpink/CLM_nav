@@ -1,32 +1,44 @@
-# CLM Nav — React / Vite
+# CLM Nav — React/Vite
 
-Projet converti depuis HTML/CSS/JS Vanilla vers React + Vite.
-
-## Installation
+## Lancer le projet
 
 ```bash
 npm install
 npm run dev
 ```
 
-## Build
+## Mettre ta clé TomTom Traffic API
 
-```bash
-npm run build
+1. À la racine du projet, copie le fichier `.env.example`.
+2. Renomme la copie en `.env`.
+3. Remplace :
+
+```env
+VITE_TOMTOM_API_KEY=TA_CLE_TOMTOM_ICI
 ```
 
-Le fichier `vite.config.js` utilise `base: "./"` pour fonctionner correctement sur GitHub Pages.
+par ta vraie clé TomTom :
 
-## Structure
+```env
+VITE_TOMTOM_API_KEY=ta_vraie_cle_api
+```
 
-- `src/App.jsx` : rendu principal de l’interface
-- `src/navos.js` : logique GPS/carte/navigation adaptée à React
-- `src/style.css` : design existant conservé
+Puis relance le serveur Vite :
 
-## Patch v1.3
+```bash
+npm run dev
+```
 
-- Ajout du choix d'itinéraire : plus rapide ou moins de kilomètres.
-- Ajout d'une couche trafic visuelle sur le tracé.
-- Ajustement du temps estimé avec un facteur trafic côté client.
+## Ce qui a été ajouté
 
-Note : sans clé API trafic professionnelle (TomTom, HERE, Mapbox Traffic, etc.), le trafic est simulé pour garder le projet fonctionnel sur GitHub Pages/Vercel. Le code est préparé pour remplacer cette simulation par une vraie API.
+- Trafic réel via TomTom Traffic Flow Segment Data.
+- Coloration des segments de route selon le trafic.
+- Ajustement du temps d’itinéraire selon les vitesses TomTom.
+- Rafraîchissement live toutes les 60 secondes en navigation.
+- Alerte si trafic dense détecté.
+- Recalcul automatique en cas de bouchon important.
+- Fallback simulation si la clé TomTom est absente ou si l’API ne répond pas.
+
+## Important
+
+Le trafic réel est actif uniquement si `VITE_TOMTOM_API_KEY` est renseigné. Sinon, le projet continue de fonctionner avec une simulation de trafic.
