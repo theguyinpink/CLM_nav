@@ -1143,3 +1143,93 @@ body.map-grabbing * {
     bottom: 100px;
   }
 }
+
+/* --- Patch navigation libre + avatars utilisateur --- */
+.user-avatar-marker {
+  position: relative;
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+.user-avatar-core {
+  position: relative;
+  z-index: 2;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: linear-gradient(145deg, rgba(245, 248, 255, 0.96), rgba(168, 190, 225, 0.92));
+  color: #0b1220;
+  border: 2px solid rgba(255, 255, 255, 0.95);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45), 0 0 22px rgba(74, 158, 255, 0.45);
+  transform-origin: 50% 50%;
+  transition: transform 0.45s ease, background 0.25s ease;
+}
+.user-avatar-core svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.user-avatar-core[data-mode="car"] {
+  background: linear-gradient(145deg, #ffffff, #bcd7ff);
+}
+.user-avatar-core[data-mode="bike"] {
+  background: linear-gradient(145deg, #ecfeff, #67e8f9);
+}
+.user-avatar-core[data-mode="walk"] {
+  background: linear-gradient(145deg, #f0fdf4, #86efac);
+}
+.user-avatar-aura {
+  position: absolute;
+  inset: 4px;
+  border-radius: 50%;
+  background: rgba(74, 158, 255, 0.22);
+  animation: userPulse 2.2s infinite;
+}
+.recenter-nav-btn {
+  position: fixed;
+  right: 24px;
+  bottom: 148px;
+  z-index: 25;
+  display: none;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(18, 18, 24, 0.72);
+  backdrop-filter: blur(18px) saturate(160%);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
+  color: rgba(255, 255, 255, 0.86);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 16px 38px rgba(0, 0, 0, 0.34);
+  transition: transform 0.25s ease, opacity 0.25s ease, border-color 0.25s ease;
+}
+.recenter-nav-btn.visible {
+  display: flex;
+}
+.recenter-nav-btn.active {
+  color: white;
+  border-color: rgba(74, 158, 255, 0.5);
+  box-shadow: 0 16px 38px rgba(0, 0, 0, 0.34), 0 0 22px rgba(74, 158, 255, 0.22);
+}
+.recenter-nav-btn:hover {
+  transform: translateY(-2px);
+}
+@media (max-width: 768px) {
+  .recenter-nav-btn {
+    right: 16px;
+    bottom: 118px;
+    padding: 10px 12px;
+  }
+}
