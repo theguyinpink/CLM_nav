@@ -1496,3 +1496,45 @@ body.map-grabbing * {
   .low-route-main { font-size: 20px; }
   .low-start-btn { padding: 13px 17px; }
 }
+
+
+/* Patch UX navbar + low bar */
+.navbar-mode-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 14px 2px 78px;
+}
+.navbar-mode-row .nav-mode-btn {
+  min-width: 92px;
+  height: 38px;
+  padding: 0 12px;
+  flex-direction: row;
+  justify-content: center;
+  border-radius: 16px;
+  background: rgba(255,255,255,.075);
+  backdrop-filter: blur(12px);
+}
+.navbar-mode-row .nav-mode-btn svg { flex: 0 0 auto; }
+body.route-ready .map-controls {
+  top: auto;
+  bottom: 112px;
+  transform: none;
+}
+body.route-ready .map-controls .control-group {
+  background: rgba(15, 17, 22, .78);
+  backdrop-filter: blur(22px) saturate(160%);
+}
+@media (max-width: 768px) {
+  body.route-ready .map-controls {
+    right: 12px;
+    bottom: 104px;
+    flex-direction: row;
+  }
+}
+@media (max-width: 640px) {
+  .navbar-mode-row { padding-left: 0; padding-right: 0; gap: 6px; }
+  .navbar-mode-row .nav-mode-btn { min-width: 0; flex: 1; height: 36px; font-size: 10px; padding: 0 8px; }
+  .navbar-mode-row .nav-mode-btn span { display: inline; }
+}

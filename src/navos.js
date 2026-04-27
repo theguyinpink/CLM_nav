@@ -160,12 +160,14 @@ export function initNavOS(maplibregl) {
     features: state.trafficSegments || [],
   });
 
+  const getDisplayCoords = (key) => state.routeOptions?.[key]?.displayCoords || state.routeOptions?.[key]?.coords || [];
+
   const routeOptionFeature = (key) => ({
     type: "Feature",
     properties: { key },
     geometry: {
       type: "LineString",
-      coordinates: state.routeOptions?.[key]?.coords || [],
+      coordinates: getDisplayCoords(key),
     },
   });
 
@@ -778,7 +780,9 @@ export function initNavOS(maplibregl) {
           });
       if (map && map.getSource("route-traffic")) map.getSource("route-traffic").setData({ type: "FeatureCollection", features: [] });
       state.trafficSegments = [];
+      document.body.classList.remove("route-ready");
       document.getElementById("routeInfo").style.display = "none";
+      document.getElementById("routeLowBar")?.classList.remove("active");
       document.getElementById("clearRouteBtn").style.display = "none";
     });
 
@@ -799,6 +803,7 @@ export function initNavOS(maplibregl) {
     const lowBar = document.getElementById("routeLowBar");
     if (routeInfo) routeInfo.style.display = "none";
     if (lowBar) lowBar.classList.remove("active");
+    document.body.classList.remove("route-ready");
   };
 
   const paintRouteSelection = () => {
@@ -825,8 +830,12 @@ export function initNavOS(maplibregl) {
     if (!lowBar) return;
     const opt = state.routeOptions?.[state.selectedRouteKey];
     lowBar.classList.toggle("active", Boolean(opt));
+    document.body.classList.toggle("route-ready", Boolean(opt));
     if (!opt) return;
-    if (hint) hint.textContent = state.selectedRouteKey === "fastest" ? "Trajet le plus rapide" : "Trajet avec moins de kilomètres";
+    if (hint) {
+      if (opt.isFallbackAlternative) hint.textContent = "Variante courte visuelle — API alternative indisponible";
+      else hint.textContent = state.selectedRouteKey === "fastest" ? "Trajet le plus rapide" : "Trajet avec moins de kilomètres";
+    }
     if (time) time.textContent = formatTime(opt.durationWithTraffic || opt.duration);
     if (dist) dist.textContent = formatDistance(opt.dist);
     const delayMin = Math.round((opt.trafficDelay || 0) / 60);
@@ -848,6 +857,31 @@ export function initNavOS(maplibregl) {
     if (map) { restoreRouteData(); paintRouteSelection(); bringRouteToFront(); }
     updateLowBar();
     updateTrafficUI();
+  };
+
+  const routesLookSame = (a, b) => {
+    if (!a?.geometry?.coordinates?.length || !b?.geometry?.coordinates?.length) return true;
+    const ad = Math.abs((a.distance || 0) - (b.distance || 0));
+    const td = Math.abs((a.duration || 0) - (b.duration || 0));
+    const ac = a.geometry.coordinates;
+    const bc = b.geometry.coordinates;
+    const sameStart = ac[0]?.[0] === bc[0]?.[0] && ac[0]?.[1] === bc[0]?.[1];
+    const sameEnd = ac.at(-1)?.[0] === bc.at(-1)?.[0] && ac.at(-1)?.[1] === bc.at(-1)?.[1];
+    return sameStart && sameEnd && ad < 25 && td < 8;
+  };
+
+  const makeDisplayOffsetCoords = (coords, meters = 18) => {
+    // Décalage visuel léger uniquement si l'API ne renvoie pas de vraie alternative.
+    // Ça évite d'avoir deux traits exactement superposés et impossibles à sélectionner.
+    const deg = meters / 111320;
+    return (coords || []).map(([lng, lat], index) => {
+      const previous = coords[Math.max(0, index - 1)] || [lng, lat];
+      const next = coords[Math.min(coords.length - 1, index + 1)] || [lng, lat];
+      const dx = next[0] - previous[0];
+      const dy = next[1] - previous[1];
+      const len = Math.hypot(dx, dy) || 1;
+      return [lng + (-dy / len) * deg, lat + (dx / len) * deg];
+    });
   };
 
   const makeRouteOption = async (key, route) => {
@@ -910,15 +944,22 @@ export function initNavOS(maplibregl) {
       clearRouteVisuals();
       const profile = getRouteProfile();
       const service = getRoutingService();
-      const res = await fetch(`https://routing.openstreetmap.de/routed-${service}/route/v1/${profile}/${state.origin.lon},${state.origin.lat};${state.destination.lon},${state.destination.lat}?overview=full&geometries=geojson&steps=true&alternatives=true`);
+      const res = await fetch(`https://routing.openstreetmap.de/routed-${service}/route/v1/${profile}/${state.origin.lon},${state.origin.lat};${state.destination.lon},${state.destination.lat}?overview=full&geometries=geojson&steps=true&alternatives=3`);
       const data = await res.json();
       if (data.code !== "Ok" || !data.routes?.length) throw new Error("Réponse OSRM invalide");
       const fastest = data.routes.reduce((best, current) => current.duration < best.duration ? current : best);
       const shortest = data.routes.reduce((best, current) => current.distance < best.distance ? current : best);
-      const [fastestOption, shortestOption] = await Promise.all([
+      const [fastestOption, rawShortestOption] = await Promise.all([
         makeRouteOption("fastest", fastest),
         makeRouteOption("shortest", shortest),
       ]);
+      const shortestOption = { ...rawShortestOption };
+      if (data.routes.length < 2 || routesLookSame(fastest, shortest)) {
+        // OSRM public ne fournit pas toujours une alternative. On garde le vrai tracé pour la navigation,
+        // mais on décale l'affichage du second choix pour qu'il soit cliquable et compréhensible visuellement.
+        shortestOption.displayCoords = makeDisplayOffsetCoords(shortestOption.coords, 20);
+        shortestOption.isFallbackAlternative = true;
+      }
       state.routeOptions = { fastest: fastestOption, shortest: shortestOption };
       if (map) {
         injectCustomLayers();
@@ -929,7 +970,11 @@ export function initNavOS(maplibregl) {
         map.fitBounds(bounds, { padding: { top: 130, bottom: 190, left: 55, right: 55 } });
       }
       selectRouteOption("fastest");
-      if (navStatus) navStatus.textContent = "Cliquez sur un tracé pour choisir votre trajet.";
+      if (navStatus) {
+        navStatus.textContent = state.routeOptions.shortest?.isFallbackAlternative
+          ? "Cliquez sur un tracé. OSRM n'a renvoyé qu'un vrai trajet, la variante courte est affichée séparément."
+          : "Cliquez sur un tracé pour choisir votre trajet.";
+      }
       const clearBtn = document.getElementById("clearRouteBtn");
       if (clearBtn) clearBtn.style.display = "flex";
     } catch (e) {
@@ -954,9 +999,10 @@ export function initNavOS(maplibregl) {
 
   document.querySelectorAll(".mode-btn").forEach((btn) => {
     btn.addEventListener("click", (e) => {
-      document.querySelectorAll(".mode-btn").forEach((b) => b.classList.remove("active"));
-      e.currentTarget.classList.add("active");
       state.mode = e.currentTarget.dataset.mode;
+      document.querySelectorAll(".mode-btn").forEach((b) => {
+        b.classList.toggle("active", b.dataset.mode === state.mode);
+      });
       if (state.userLocation) updateUserMarker(state.userLocation.lat, state.userLocation.lon);
       if (state.origin && state.destination) calculateRoute();
     });
