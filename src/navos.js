@@ -23,6 +23,8 @@ export function initNavOS(maplibregl) {
     routeCoords: [],
     routeSummary: null,
     routeSteps: [],
+    routeOptions: {},
+    selectedRouteKey: null,
     mapMode: "map",
     autoFollow: true,
     lastGpsPoint: null,
@@ -153,6 +155,15 @@ export function initNavOS(maplibregl) {
     features: state.trafficSegments || [],
   });
 
+  const routeOptionFeature = (key) => ({
+    type: "Feature",
+    properties: { key },
+    geometry: {
+      type: "LineString",
+      coordinates: state.routeOptions?.[key]?.coords || [],
+    },
+  });
+
   const restoreRouteData = () => {
     try {
       if (map?.getSource("route")) {
@@ -161,6 +172,11 @@ export function initNavOS(maplibregl) {
       if (map?.getSource("route-traffic")) {
         map.getSource("route-traffic").setData(trafficFeature());
       }
+      ["fastest", "shortest"].forEach((key) => {
+        if (map?.getSource(`route-${key}`)) {
+          map.getSource(`route-${key}`).setData(routeOptionFeature(key));
+        }
+      });
     } catch (error) {
       console.warn("Route non restaurée après changement de style :", error);
     }
@@ -170,6 +186,10 @@ export function initNavOS(maplibregl) {
     try {
       if (map.getLayer("route-casing")) map.moveLayer("route-casing");
       if (map.getLayer("route-traffic")) map.moveLayer("route-traffic");
+      if (map.getLayer("route-fastest-casing")) map.moveLayer("route-fastest-casing");
+      if (map.getLayer("route-fastest-line")) map.moveLayer("route-fastest-line");
+      if (map.getLayer("route-shortest-casing")) map.moveLayer("route-shortest-casing");
+      if (map.getLayer("route-shortest-line")) map.moveLayer("route-shortest-line");
       if (map.getLayer("route-line")) map.moveLayer("route-line");
     } catch (error) {
       console.warn("Impossible de replacer le tracé au-dessus de la carte :", error);
@@ -219,6 +239,33 @@ export function initNavOS(maplibregl) {
         });
         console.log("✅ Couche bâtiments 3D injectée sur source:", vectorSourceKey);
       }
+
+      ["fastest", "shortest"].forEach((key) => {
+        if (!map.getSource(`route-${key}`)) {
+          map.addSource(`route-${key}`, { type: "geojson", data: routeOptionFeature(key) });
+        }
+        if (!map.getLayer(`route-${key}-casing`)) {
+          map.addLayer({
+            id: `route-${key}-casing`,
+            type: "line",
+            source: `route-${key}`,
+            layout: { "line-join": "round", "line-cap": "round" },
+            paint: { "line-color": "#05070c", "line-width": 10, "line-opacity": 0.76 },
+          });
+        }
+        if (!map.getLayer(`route-${key}-line`)) {
+          map.addLayer({
+            id: `route-${key}-line`,
+            type: "line",
+            source: `route-${key}`,
+            layout: { "line-join": "round", "line-cap": "round" },
+            paint: { "line-color": key === "fastest" ? "#4A9EFF" : "#a78bfa", "line-width": 7, "line-opacity": 0.52 },
+          });
+          map.on("click", `route-${key}-line`, () => selectRouteOption(key));
+          map.on("mouseenter", `route-${key}-line`, () => { map.getCanvas().style.cursor = "pointer"; });
+          map.on("mouseleave", `route-${key}-line`, () => { map.getCanvas().style.cursor = ""; });
+        }
+      });
 
       if (!map.getSource("route")) {
         map.addSource("route", { type: "geojson", data: routeFeature() });
@@ -574,13 +621,20 @@ export function initNavOS(maplibregl) {
           if (type === "origin") {
             state.origin = { lat, lon, name: parts[0] };
             document.getElementById("originInput").value = parts[0];
+            const navOriginInput = document.getElementById("navOriginInput");
+            if (navOriginInput) navOriginInput.value = parts[0];
             setMarker("origin", lat, lon, parts[0]);
+            if (state.destination) calculateRoute();
           }
           if (type === "dest") {
             state.destination = { lat, lon, name: parts[0] };
             document.getElementById("destInput").value = parts[0];
+            const navSearchInput = document.getElementById("navSearchInput");
+            if (navSearchInput) navSearchInput.value = parts[0];
+            document.getElementById("searchNav")?.classList.add("expanded");
             document.getElementById("clearDest").style.display = "flex";
             setMarker("dest", lat, lon, parts[0]);
+            calculateRoute();
           }
           container.classList.remove("open");
 
@@ -630,11 +684,21 @@ export function initNavOS(maplibregl) {
         400,
       ),
     );
+  const navSearchInput = document.getElementById("navSearchInput");
+  const navOriginInput = document.getElementById("navOriginInput");
+  if (navSearchInput) {
+    navSearchInput.addEventListener("focus", () => document.getElementById("searchNav")?.classList.add("focused"));
+    navSearchInput.addEventListener("input", debounce((e) =>
+      searchAddress(e.target.value, document.getElementById("navDestSuggestions"), "dest"), 400));
+  }
+  if (navOriginInput) {
+    navOriginInput.addEventListener("input", debounce((e) =>
+      searchAddress(e.target.value, document.getElementById("navOriginSuggestions"), "origin"), 400));
+  }
+
   document.addEventListener("click", () => {
-    const os = document.getElementById("originSuggestions"),
-      ds = document.getElementById("destSuggestions");
-    if (os) os.classList.remove("open");
-    if (ds) ds.classList.remove("open");
+    const lists = ["originSuggestions", "destSuggestions", "navOriginSuggestions", "navDestSuggestions"];
+    lists.forEach((id) => document.getElementById(id)?.classList.remove("open"));
   });
 
   const clearDestBtn = document.getElementById("clearDest");
@@ -658,112 +722,181 @@ export function initNavOS(maplibregl) {
       document.getElementById("clearRouteBtn").style.display = "none";
     });
 
-  // 9. ROUTAGE OSRM + préférence + trafic
-  const calculateRoute = async () => {
-    if (!state.origin || !state.destination)
-      return showToast(
-        "Veuillez définir un départ et une destination",
-        "error",
-      );
-    const calcBtn = document.getElementById("calcBtn");
-    calcBtn.disabled = true;
-    calcBtn.innerHTML = "Calcul...";
+  // 9. ROUTAGE OSRM — nouvelle UX : deux tracés visibles puis sélection sur la carte
+  const clearRouteVisuals = () => {
+    state.routeCoords = [];
+    state.routeSummary = null;
+    state.routeSteps = [];
+    state.routeOptions = {};
+    state.selectedRouteKey = null;
+    state.trafficSegments = [];
+    if (map?.getSource("route")) map.getSource("route").setData(routeFeature());
+    if (map?.getSource("route-traffic")) map.getSource("route-traffic").setData({ type: "FeatureCollection", features: [] });
+    ["fastest", "shortest"].forEach((key) => {
+      if (map?.getSource(`route-${key}`)) map.getSource(`route-${key}`).setData(routeOptionFeature(key));
+    });
+    const routeInfo = document.getElementById("routeInfo");
+    const lowBar = document.getElementById("routeLowBar");
+    if (routeInfo) routeInfo.style.display = "none";
+    if (lowBar) lowBar.classList.remove("active");
+  };
 
+  const paintRouteSelection = () => {
+    if (!map) return;
+    ["fastest", "shortest"].forEach((key) => {
+      const active = state.selectedRouteKey === key;
+      if (map.getLayer(`route-${key}-line`)) {
+        map.setPaintProperty(`route-${key}-line`, "line-opacity", active ? 0.98 : 0.46);
+        map.setPaintProperty(`route-${key}-line`, "line-width", active ? 8 : 6);
+      }
+      if (map.getLayer(`route-${key}-casing`)) {
+        map.setPaintProperty(`route-${key}-casing`, "line-width", active ? 14 : 10);
+      }
+    });
+  };
+
+  const updateLowBar = () => {
+    const lowBar = document.getElementById("routeLowBar");
+    const hint = document.getElementById("lowRouteHint");
+    const time = document.getElementById("lowRouteTime");
+    const dist = document.getElementById("lowRouteDistance");
+    const traffic = document.getElementById("lowRouteTraffic");
+    const startBtn = document.getElementById("lowStartNavBtn");
+    if (!lowBar) return;
+    const opt = state.routeOptions?.[state.selectedRouteKey];
+    lowBar.classList.toggle("active", Boolean(opt));
+    if (!opt) return;
+    if (hint) hint.textContent = state.selectedRouteKey === "fastest" ? "Trajet le plus rapide" : "Trajet avec moins de kilomètres";
+    if (time) time.textContent = formatTime(opt.durationWithTraffic || opt.duration);
+    if (dist) dist.textContent = formatDistance(opt.dist);
+    const delayMin = Math.round((opt.trafficDelay || 0) / 60);
+    if (traffic) traffic.textContent = state.mode === "car" ? (delayMin >= 3 ? `Trafic +${delayMin} min` : "Trafic fluide") : "Trafic non actif";
+    if (startBtn) startBtn.disabled = false;
+  };
+
+  const selectRouteOption = (key) => {
+    const opt = state.routeOptions?.[key];
+    if (!opt) return;
+    state.selectedRouteKey = key;
+    state.routePreference = key;
+    state.routeCoords = opt.coords;
+    state.routeSummary = { dist: opt.dist, duration: opt.duration, durationWithTraffic: opt.durationWithTraffic };
+    state.routeSteps = opt.steps || [];
+    state.trafficSegments = opt.trafficSegments || [];
+    state.trafficFactor = opt.trafficFactor || 1;
+    state.trafficDelay = opt.trafficDelay || 0;
+    if (map) { restoreRouteData(); paintRouteSelection(); bringRouteToFront(); }
+    updateLowBar();
+    updateTrafficUI();
+  };
+
+  const makeRouteOption = (key, route) => {
+    const oldSegments = state.trafficSegments;
+    const oldFactor = state.trafficFactor;
+    const oldDelay = state.trafficDelay;
+    buildTrafficSegments(route.geometry.coordinates, route.duration);
+    const opt = {
+      key,
+      coords: route.geometry.coordinates,
+      dist: route.distance,
+      duration: route.duration,
+      durationWithTraffic: adjustedDuration(route.duration),
+      trafficSegments: [...state.trafficSegments],
+      trafficFactor: state.trafficFactor,
+      trafficDelay: state.trafficDelay,
+      steps: route.legs?.[0]?.steps || [],
+    };
+    state.trafficSegments = oldSegments;
+    state.trafficFactor = oldFactor;
+    state.trafficDelay = oldDelay;
+    return opt;
+  };
+
+  const ensureOriginFromCurrentPosition = () => new Promise((resolve) => {
+    if (state.origin) return resolve(true);
+    if (state.userLocation) {
+      state.origin = { ...state.userLocation, name: "Ma position" };
+      const input = document.getElementById("navOriginInput") || document.getElementById("originInput");
+      if (input) input.value = "Ma position";
+      setMarker("origin", state.origin.lat, state.origin.lon, "Ma position");
+      return resolve(true);
+    }
+    if (!navigator.geolocation) { showToast("Position indisponible, choisissez un départ", "error"); return resolve(false); }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        state.userLocation = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+        state.origin = { ...state.userLocation, name: "Ma position" };
+        const input = document.getElementById("navOriginInput") || document.getElementById("originInput");
+        if (input) input.value = "Ma position";
+        setMarker("origin", state.origin.lat, state.origin.lon, "Ma position");
+        updateUserMarker(state.origin.lat, state.origin.lon);
+        resolve(true);
+      },
+      () => { showToast("Autorisez la position ou saisissez un départ", "error"); document.getElementById("searchNav")?.classList.add("expanded"); resolve(false); },
+      { enableHighAccuracy: true, timeout: 9000, maximumAge: 60000 },
+    );
+  });
+
+  const calculateRoute = async () => {
+    const ok = await ensureOriginFromCurrentPosition();
+    if (!ok || !state.destination) return;
+    const calcBtn = document.getElementById("calcBtn");
+    const navStatus = document.getElementById("navSearchStatus");
+    if (calcBtn) { calcBtn.disabled = true; calcBtn.innerHTML = "Calcul..."; }
+    if (navStatus) navStatus.textContent = "Calcul des 2 itinéraires…";
     try {
+      clearRouteVisuals();
       const profile = getRouteProfile();
       const service = getRoutingService();
-      const res = await fetch(
-        `https://routing.openstreetmap.de/routed-${service}/route/v1/${profile}/${state.origin.lon},${state.origin.lat};${state.destination.lon},${state.destination.lat}?overview=full&geometries=geojson&steps=true&alternatives=true`,
-      );
+      const res = await fetch(`https://routing.openstreetmap.de/routed-${service}/route/v1/${profile}/${state.origin.lon},${state.origin.lat};${state.destination.lon},${state.destination.lat}?overview=full&geometries=geojson&steps=true&alternatives=true`);
       const data = await res.json();
-
-      if (data.code !== "Ok" || !data.routes?.length)
-        throw new Error("Réponse OSRM invalide");
-
-      const routes = data.routes;
-      const route =
-        state.routePreference === "shortest"
-          ? routes.reduce((best, current) =>
-              current.distance < best.distance ? current : best,
-            )
-          : routes.reduce((best, current) =>
-              current.duration < best.duration ? current : best,
-            );
-
-      state.routeCoords = route.geometry.coordinates;
-      buildTrafficSegments(state.routeCoords, route.duration);
-      const durationWithTraffic = adjustedDuration(route.duration);
-      state.routeSummary = {
-        dist: route.distance,
-        duration: route.duration,
-        durationWithTraffic,
-      };
-      state.routeSteps = route.legs[0].steps;
-
+      if (data.code !== "Ok" || !data.routes?.length) throw new Error("Réponse OSRM invalide");
+      const fastest = data.routes.reduce((best, current) => current.duration < best.duration ? current : best);
+      const shortest = data.routes.reduce((best, current) => current.distance < best.distance ? current : best);
+      state.routeOptions = { fastest: makeRouteOption("fastest", fastest), shortest: makeRouteOption("shortest", shortest) };
       if (map) {
         injectCustomLayers();
         restoreRouteData();
-        bringRouteToFront();
+        const first = state.routeOptions.fastest.coords[0];
+        const bounds = new maplibregl.LngLatBounds(first, first);
+        Object.values(state.routeOptions).forEach((opt) => opt.coords.forEach((c) => bounds.extend(c)));
+        map.fitBounds(bounds, { padding: { top: 130, bottom: 190, left: 55, right: 55 } });
       }
-
-      if (map) {
-        const bounds = new maplibregl.LngLatBounds(
-          state.routeCoords[0],
-          state.routeCoords[0],
-        );
-        state.routeCoords.forEach((c) => bounds.extend(c));
-        map.fitBounds(bounds, { padding: 60 });
-      }
-
-      document.getElementById("routeDistance").textContent = formatDistance(
-        route.distance,
-      );
-      document.getElementById("routeDuration").textContent = formatTime(
-        durationWithTraffic,
-      );
-      updateTrafficUI();
-      document.getElementById("routeInfo").style.display = "flex";
-      document.getElementById("clearRouteBtn").style.display = "flex";
+      selectRouteOption("fastest");
+      if (navStatus) navStatus.textContent = "Cliquez sur un tracé pour choisir votre trajet.";
+      const clearBtn = document.getElementById("clearRouteBtn");
+      if (clearBtn) clearBtn.style.display = "flex";
     } catch (e) {
       console.error(e);
-      showToast("Impossible de calculer l'itinéraire", "error");
+      showToast("Impossible de calculer les itinéraires", "error");
+      if (navStatus) navStatus.textContent = "Calcul impossible.";
     } finally {
-      calcBtn.disabled = false;
-      calcBtn.innerHTML = "Calculer";
+      if (calcBtn) { calcBtn.disabled = false; calcBtn.innerHTML = "Calculer"; }
     }
   };
-  if (document.getElementById("calcBtn"))
-    document
-      .getElementById("calcBtn")
-      .addEventListener("click", calculateRoute);
+
+  if (document.getElementById("calcBtn")) document.getElementById("calcBtn").addEventListener("click", calculateRoute);
+  document.getElementById("lowStartNavBtn")?.addEventListener("click", () => startNavigation());
 
   document.querySelectorAll(".pref-btn").forEach((btn) => {
     btn.addEventListener("click", (e) => {
-      document
-        .querySelectorAll(".pref-btn")
-        .forEach((b) => b.classList.remove("active"));
-      e.currentTarget.classList.add("active");
-      state.routePreference = e.currentTarget.dataset.pref;
-      if (state.origin && state.destination) calculateRoute();
+      const key = e.currentTarget.dataset.pref;
+      if (state.routeOptions?.[key]) selectRouteOption(key);
+      else { state.routePreference = key; if (state.origin && state.destination) calculateRoute(); }
     });
   });
 
   document.querySelectorAll(".mode-btn").forEach((btn) => {
     btn.addEventListener("click", (e) => {
-      document
-        .querySelectorAll(".mode-btn")
-        .forEach((b) => b.classList.remove("active"));
+      document.querySelectorAll(".mode-btn").forEach((b) => b.classList.remove("active"));
       e.currentTarget.classList.add("active");
       state.mode = e.currentTarget.dataset.mode;
       if (state.userLocation) updateUserMarker(state.userLocation.lat, state.userLocation.lon);
       if (state.origin && state.destination) calculateRoute();
     });
   });
-
   // 10. NAVIGATION TEMPS RÉEL (Geoloc sécurisée)
-  const startNavBtn = document.getElementById("startNavBtn");
-  if (startNavBtn)
-    startNavBtn.addEventListener("click", () => {
+  const startNavigation = () => {
       if (!navigator.geolocation) return showToast("GPS non supporté", "error");
       state.isNavigating = true;
       state.autoFollow = true;
@@ -867,7 +1000,10 @@ export function initNavOS(maplibregl) {
         },
         { enableHighAccuracy: true },
       );
-    });
+  };
+
+  const startNavBtn = document.getElementById("startNavBtn");
+  if (startNavBtn) startNavBtn.addEventListener("click", startNavigation);
 
   const endNavBtn = document.getElementById("endNavBtn");
   if (endNavBtn)

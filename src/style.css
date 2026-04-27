@@ -1316,3 +1316,183 @@ body.map-grabbing * {
   background: rgba(239, 68, 68, 0.14);
   color: #ef4444;
 }
+
+/* ============================================================
+   UX PATCH — Navbar search + route low bar
+   ============================================================ */
+.top-bar,
+.side-panel {
+  display: none !important;
+}
+
+.search-nav {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(760px, calc(100vw - 28px));
+  z-index: 1200;
+  border: 1px solid rgba(255,255,255,.12);
+  background: rgba(18, 20, 26, .76);
+  backdrop-filter: blur(28px) saturate(160%);
+  -webkit-backdrop-filter: blur(28px) saturate(160%);
+  border-radius: 28px;
+  box-shadow: 0 24px 80px rgba(0,0,0,.38), inset 0 1px 0 rgba(255,255,255,.1);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.search-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.search-brand {
+  flex: 0 0 auto;
+  padding: 0 8px 0 10px;
+  font-weight: 800;
+  letter-spacing: -.04em;
+  color: rgba(255,255,255,.92);
+}
+
+.nav-search-field {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  height: 46px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px;
+  border-radius: 20px;
+  background: rgba(255,255,255,.08);
+  border: 1px solid rgba(255,255,255,.1);
+}
+
+.nav-search-field input {
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  border: 0;
+  outline: 0;
+  color: #fff;
+  font: inherit;
+  font-size: 15px;
+}
+
+.nav-search-field input::placeholder { color: rgba(255,255,255,.46); }
+
+.field-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  flex: 0 0 auto;
+  box-shadow: 0 0 0 5px rgba(255,255,255,.05);
+}
+.field-dot.origin { background: #34d399; }
+.field-dot.destination { background: #60a5fa; }
+
+.origin-row {
+  display: none;
+  padding-left: 70px;
+}
+.search-nav.expanded .origin-row,
+.search-nav.focused .origin-row {
+  display: flex;
+}
+
+.nav-search-status {
+  padding: 0 14px 4px 78px;
+  color: rgba(255,255,255,.54);
+  font-size: 12px;
+}
+
+.nav-suggestions {
+  top: calc(100% + 8px) !important;
+  left: 0 !important;
+  right: 0 !important;
+  z-index: 1500 !important;
+}
+
+.route-low-bar {
+  position: fixed;
+  left: 50%;
+  bottom: 22px;
+  transform: translate(-50%, calc(100% + 40px));
+  width: min(560px, calc(100vw - 28px));
+  z-index: 1150;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 14px 14px 14px 18px;
+  border-radius: 28px;
+  border: 1px solid rgba(255,255,255,.14);
+  background: rgba(15, 17, 22, .82);
+  backdrop-filter: blur(28px) saturate(160%);
+  -webkit-backdrop-filter: blur(28px) saturate(160%);
+  box-shadow: 0 22px 90px rgba(0,0,0,.48), inset 0 1px 0 rgba(255,255,255,.1);
+  opacity: 0;
+  pointer-events: none;
+  transition: transform .35s cubic-bezier(.2,.8,.2,1), opacity .25s ease;
+}
+.route-low-bar.active {
+  transform: translate(-50%, 0);
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.low-route-copy { min-width: 0; }
+.low-route-hint {
+  color: rgba(255,255,255,.58);
+  font-size: 12px;
+  margin-bottom: 2px;
+}
+.low-route-main {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  color: #fff;
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -.04em;
+}
+.low-separator { color: rgba(255,255,255,.38); font-size: 16px; }
+.low-route-traffic {
+  margin-top: 4px;
+  color: rgba(255,255,255,.58);
+  font-size: 12px;
+}
+.low-start-btn {
+  border: 0;
+  color: #fff;
+  font-weight: 800;
+  font-size: 15px;
+  padding: 14px 20px;
+  border-radius: 20px;
+  background: linear-gradient(135deg, #34d399, #059669);
+  box-shadow: 0 12px 30px rgba(5, 150, 105, .35);
+  cursor: pointer;
+}
+.low-start-btn:disabled { opacity: .55; cursor: not-allowed; }
+
+@media (max-width: 640px) {
+  .search-nav {
+    top: 10px;
+    width: calc(100vw - 18px);
+    border-radius: 24px;
+  }
+  .search-brand { display: none; }
+  .origin-row { padding-left: 0; }
+  .nav-search-status { padding-left: 12px; }
+  .route-low-bar {
+    bottom: 12px;
+    width: calc(100vw - 18px);
+    border-radius: 24px;
+  }
+  .low-route-main { font-size: 20px; }
+  .low-start-btn { padding: 13px 17px; }
+}
