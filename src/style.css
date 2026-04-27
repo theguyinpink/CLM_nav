@@ -1252,3 +1252,67 @@ body.map-grabbing * {
     transform: translateX(-50%) translateY(0);
   }
 }
+
+/* --- Route preference + traffic v1.3 --- */
+.route-choice-section {
+  padding-top: 0;
+}
+
+.route-preference {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.pref-btn {
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  border-radius: var(--radius-md);
+  padding: 11px 10px;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+  transition: all var(--transition);
+}
+
+.pref-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.pref-btn.active {
+  background: var(--bg-active);
+  border-color: var(--border-active);
+  box-shadow: inset 0 0 0 1px rgba(74, 158, 255, 0.18);
+  color: var(--accent-blue);
+}
+
+.pref-title {
+  display: block;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.pref-sub {
+  display: block;
+  margin-top: 3px;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.traffic-label {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-secondary);
+}
+
+.stat-icon.traffic-medium {
+  background: rgba(245, 158, 11, 0.14);
+  color: #f59e0b;
+}
+
+.stat-icon.traffic-heavy {
+  background: rgba(239, 68, 68, 0.14);
+  color: #ef4444;
+}

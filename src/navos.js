@@ -13,6 +13,10 @@ export function initNavOS(maplibregl) {
     destination: null,
     userLocation: null,
     mode: "car",
+    routePreference: "fastest",
+    trafficSegments: [],
+    trafficFactor: 1,
+    trafficDelay: 0,
     favorites: JSON.parse(localStorage.getItem("navos_favs")) || [],
     isNavigating: false,
     watchId: null,
@@ -144,10 +148,18 @@ export function initNavOS(maplibregl) {
     },
   });
 
+  const trafficFeature = () => ({
+    type: "FeatureCollection",
+    features: state.trafficSegments || [],
+  });
+
   const restoreRouteData = () => {
     try {
       if (map?.getSource("route")) {
         map.getSource("route").setData(routeFeature());
+      }
+      if (map?.getSource("route-traffic")) {
+        map.getSource("route-traffic").setData(trafficFeature());
       }
     } catch (error) {
       console.warn("Route non restaurée après changement de style :", error);
@@ -157,6 +169,7 @@ export function initNavOS(maplibregl) {
   const bringRouteToFront = () => {
     try {
       if (map.getLayer("route-casing")) map.moveLayer("route-casing");
+      if (map.getLayer("route-traffic")) map.moveLayer("route-traffic");
       if (map.getLayer("route-line")) map.moveLayer("route-line");
     } catch (error) {
       console.warn("Impossible de replacer le tracé au-dessus de la carte :", error);
@@ -232,7 +245,26 @@ export function initNavOS(maplibregl) {
           type: "line",
           source: "route",
           layout: { "line-join": "round", "line-cap": "round" },
-          paint: { "line-color": "#4A9EFF", "line-width": 6, "line-opacity": 0.98 },
+          paint: { "line-color": "#4A9EFF", "line-width": 6, "line-opacity": 0.62 },
+        });
+      }
+
+      if (!map.getSource("route-traffic")) {
+        map.addSource("route-traffic", { type: "geojson", data: trafficFeature() });
+      }
+
+      if (!map.getLayer("route-traffic")) {
+        map.addLayer({
+          id: "route-traffic",
+          type: "line",
+          source: "route-traffic",
+          layout: { "line-join": "round", "line-cap": "round" },
+          paint: {
+            "line-color": ["get", "color"],
+            "line-width": 7,
+            "line-opacity": 0.92,
+            "line-blur": 0.3,
+          },
         });
       }
 
@@ -329,6 +361,87 @@ export function initNavOS(maplibregl) {
           Math.sin(((lon2 - lon1) * rad) / 2) ** 2;
     return 6371e3 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   };
+
+  const getRouteProfile = () =>
+    state.mode === "car" ? "driving" : state.mode === "bike" ? "cycling" : "foot";
+
+  const getRoutingService = () =>
+    state.mode === "car" ? "car" : state.mode === "bike" ? "bike" : "foot";
+
+  const buildTrafficSegments = (coords, duration) => {
+    if (!coords || coords.length < 2 || state.mode !== "car") {
+      state.trafficSegments = [];
+      state.trafficFactor = 1;
+      state.trafficDelay = 0;
+      return;
+    }
+
+    const nowBucket = Math.floor(Date.now() / 60000);
+    const step = Math.max(2, Math.floor(coords.length / 14));
+    const features = [];
+    let weightedFactor = 0;
+    let weightedLength = 0;
+
+    for (let i = 0; i < coords.length - 1; i += step) {
+      const part = coords.slice(i, Math.min(coords.length, i + step + 1));
+      if (part.length < 2) continue;
+
+      let segmentLength = 0;
+      for (let j = 1; j < part.length; j++) {
+        segmentLength += getDistance(part[j - 1][1], part[j - 1][0], part[j][1], part[j][0]);
+      }
+
+      const seed = Math.abs(Math.sin((part[0][0] * 91.7 + part[0][1] * 53.3 + nowBucket * 0.13 + i) * 12.9898));
+      let level = "fluid";
+      let factor = 1.02;
+      let color = "#34d399";
+
+      if (seed > 0.78) {
+        level = "heavy";
+        factor = 1.65;
+        color = "#ef4444";
+      } else if (seed > 0.55) {
+        level = "slow";
+        factor = 1.28;
+        color = "#f59e0b";
+      }
+
+      weightedFactor += factor * segmentLength;
+      weightedLength += segmentLength;
+      features.push({
+        type: "Feature",
+        properties: { level, factor, color },
+        geometry: { type: "LineString", coordinates: part },
+      });
+    }
+
+    const factor = weightedLength > 0 ? weightedFactor / weightedLength : 1;
+    state.trafficSegments = features;
+    state.trafficFactor = Math.max(1, factor);
+    state.trafficDelay = Math.max(0, duration * (state.trafficFactor - 1));
+  };
+
+  const updateTrafficUI = () => {
+    const status = document.getElementById("trafficStatus");
+    const navTraffic = document.getElementById("navTraffic");
+    const icon = document.getElementById("trafficIcon");
+    const delayMin = Math.round((state.trafficDelay || 0) / 60);
+
+    let label = "fluide";
+    if (state.mode !== "car") label = "non actif";
+    else if (delayMin >= 10) label = "bouchons +" + delayMin + " min";
+    else if (delayMin >= 3) label = "ralenti +" + delayMin + " min";
+
+    if (status) status.textContent = "Trafic : " + label;
+    if (navTraffic) navTraffic.textContent = "trafic " + label;
+    if (icon) {
+      icon.classList.remove("traffic-good", "traffic-medium", "traffic-heavy");
+      icon.classList.add(delayMin >= 10 ? "traffic-heavy" : delayMin >= 3 ? "traffic-medium" : "traffic-good");
+    }
+  };
+
+  const adjustedDuration = (duration) =>
+    state.mode === "car" ? Math.round(duration * (state.trafficFactor || 1)) : Math.round(duration);
 
   // 7. MARQUEURS MAPLIBRE
   const setMarker = (type, lat, lon, title) => {
@@ -539,11 +652,13 @@ export function initNavOS(maplibregl) {
             properties: {},
             geometry: { type: "LineString", coordinates: [] },
           });
+      if (map && map.getSource("route-traffic")) map.getSource("route-traffic").setData({ type: "FeatureCollection", features: [] });
+      state.trafficSegments = [];
       document.getElementById("routeInfo").style.display = "none";
       document.getElementById("clearRouteBtn").style.display = "none";
     });
 
-  // 9. ROUTAGE OSRM
+  // 9. ROUTAGE OSRM + préférence + trafic
   const calculateRoute = async () => {
     if (!state.origin || !state.destination)
       return showToast(
@@ -555,21 +670,34 @@ export function initNavOS(maplibregl) {
     calcBtn.innerHTML = "Calcul...";
 
     try {
-      const profile =
-        state.mode === "car"
-          ? "driving"
-          : state.mode === "bike"
-            ? "cycling"
-            : "foot";
+      const profile = getRouteProfile();
+      const service = getRoutingService();
       const res = await fetch(
-        `https://routing.openstreetmap.de/routed-${state.mode === "car" ? "car" : state.mode}/route/v1/${profile}/${state.origin.lon},${state.origin.lat};${state.destination.lon},${state.destination.lat}?overview=full&geometries=geojson&steps=true`,
+        `https://routing.openstreetmap.de/routed-${service}/route/v1/${profile}/${state.origin.lon},${state.origin.lat};${state.destination.lon},${state.destination.lat}?overview=full&geometries=geojson&steps=true&alternatives=true`,
       );
       const data = await res.json();
 
-      if (data.code !== "Ok") throw new Error("Réponse OSRM invalide");
-      const route = data.routes[0];
+      if (data.code !== "Ok" || !data.routes?.length)
+        throw new Error("Réponse OSRM invalide");
+
+      const routes = data.routes;
+      const route =
+        state.routePreference === "shortest"
+          ? routes.reduce((best, current) =>
+              current.distance < best.distance ? current : best,
+            )
+          : routes.reduce((best, current) =>
+              current.duration < best.duration ? current : best,
+            );
+
       state.routeCoords = route.geometry.coordinates;
-      state.routeSummary = { dist: route.distance, duration: route.duration };
+      buildTrafficSegments(state.routeCoords, route.duration);
+      const durationWithTraffic = adjustedDuration(route.duration);
+      state.routeSummary = {
+        dist: route.distance,
+        duration: route.duration,
+        durationWithTraffic,
+      };
       state.routeSteps = route.legs[0].steps;
 
       if (map) {
@@ -591,8 +719,9 @@ export function initNavOS(maplibregl) {
         route.distance,
       );
       document.getElementById("routeDuration").textContent = formatTime(
-        route.duration,
+        durationWithTraffic,
       );
+      updateTrafficUI();
       document.getElementById("routeInfo").style.display = "flex";
       document.getElementById("clearRouteBtn").style.display = "flex";
     } catch (e) {
@@ -607,6 +736,17 @@ export function initNavOS(maplibregl) {
     document
       .getElementById("calcBtn")
       .addEventListener("click", calculateRoute);
+
+  document.querySelectorAll(".pref-btn").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      document
+        .querySelectorAll(".pref-btn")
+        .forEach((b) => b.classList.remove("active"));
+      e.currentTarget.classList.add("active");
+      state.routePreference = e.currentTarget.dataset.pref;
+      if (state.origin && state.destination) calculateRoute();
+    });
+  });
 
   document.querySelectorAll(".mode-btn").forEach((btn) => {
     btn.addEventListener("click", (e) => {
@@ -637,12 +777,13 @@ export function initNavOS(maplibregl) {
         state.routeSummary.dist,
       );
       document.getElementById("navTimeLeft").textContent = formatTime(
-        state.routeSummary.duration,
+        state.routeSummary.durationWithTraffic || state.routeSummary.duration,
       );
       document.getElementById("navNextStreet").textContent =
         state.routeSteps.length > 0
           ? state.routeSteps[0].maneuver.instruction
           : "Continuez sur l’itinéraire";
+      updateTrafficUI();
 
       document.getElementById("view3D").click(); // Auto 3D
       if (map) {
